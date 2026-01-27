@@ -1,0 +1,303 @@
+"""
+Configuration Management
+
+Centralized configuration management using environment variables
+with proper validation and type safety.
+"""
+
+import os
+from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+# Load environment variables from .env in backend directory
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=str(_env_path))
+else:
+    # Fallback to .env.local in parent directory (for backward compatibility)
+    _env_path_fallback = Path(__file__).parent.parent.parent / ".env.local"
+    if _env_path_fallback.exists():
+        load_dotenv(dotenv_path=str(_env_path_fallback))
+    else:
+        # Last fallback to current directory
+        load_dotenv()
+
+# Note: Google API key setup removed - using self-hosted OpenAI-compatible models only
+
+
+@dataclass
+class LiveKitConfig:
+    """LiveKit agent configuration"""
+    api_key: str
+    api_secret: str
+    url: str
+    agent_name: str = "my-interviewer"
+
+
+@dataclass
+class OpenAIConfig:
+    """OpenAI / Self-hosted configuration"""
+    api_key: str
+    llm_base_url: str
+    tts_base_url: str
+    stt_base_url: str
+    llm_model: str = "qwen2-5-7b-instruct"
+    tts_model: str = "kokoro"
+    stt_model: str = "small.en"
+    tts_voice: str = "af_bella"
+    # Enable/disable flags for self-hosted services
+    stt_enabled: bool = True
+    llm_enabled: bool = True
+    tts_enabled: bool = True
+
+
+@dataclass
+class DeepgramConfig:
+    """Deepgram STT configuration"""
+    api_key: Optional[str] = None
+    enabled: bool = False
+
+
+@dataclass
+class ElevenLabsConfig:
+    """ElevenLabs STT fallback configuration"""
+    api_key: Optional[str] = None
+    enabled: bool = False
+
+
+@dataclass
+class GeminiConfig:
+    """Google Gemini LLM configuration (cloud fallback)"""
+    api_key: Optional[str] = None
+    model: str = "gemini-1.5-flash"
+    enabled: bool = False
+
+
+@dataclass
+class ElevenLabsTTSConfig:
+    """ElevenLabs TTS configuration (cloud fallback)"""
+    api_key: Optional[str] = None
+    voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    enabled: bool = False
+
+
+@dataclass
+class SileroVADConfig:
+    """Silero VAD configuration"""
+    min_speech_duration: float = 0.2  # Reduced for better sensitivity
+    min_silence_duration: float = 0.8  # Reduced for faster response
+    activation_threshold: float = 0.5  # Standard sensitivity
+
+
+@dataclass
+class SupabaseConfig:
+    """Supabase configuration"""
+    url: str
+    service_role_key: str
+
+
+@dataclass
+class SMTPConfig:
+    """SMTP email configuration"""
+    host: Optional[str] = None
+    port: int = 587
+    secure: bool = False
+    user: Optional[str] = None
+    password: Optional[str] = None
+    from_name: str = "Sreedhar's CCE Team"
+    from_email: Optional[str] = None
+
+
+@dataclass
+class ServerConfig:
+    """HTTP server configuration"""
+    host: str
+    port: int
+    frontend_url: str = ""
+
+
+@dataclass
+class Config:
+    """Main application configuration"""
+    
+    # LiveKit configuration
+    livekit: LiveKitConfig
+    
+    # AI Services - Self-hosted (Primary)
+    openai: OpenAIConfig
+    silero_vad: SileroVADConfig
+    
+    # AI Services - Cloud (Fallback)
+    deepgram_stt: DeepgramConfig         # STT cloud service
+    elevenlabs_stt: ElevenLabsConfig     # STT fallback (secondary)
+    elevenlabs_tts: ElevenLabsTTSConfig  # TTS fallback
+    gemini_llm: GeminiConfig             # LLM fallback
+    
+    # Supabase configuration
+    supabase: SupabaseConfig
+    
+    # SMTP configuration
+    smtp: SMTPConfig
+    
+    # Server configuration
+    server: ServerConfig
+    
+    # Application processing
+    MAX_APPLICATION_LENGTH: int = 3000  # Characters
+    
+    # Conversation History Management
+    # Maximum tokens for conversation messages (excluding system instructions)
+    # Reduced to 3000 for safer operation with 8K token models
+    MAX_CONVERSATION_TOKENS: int = int(os.getenv("MAX_CONVERSATION_TOKENS", "3000"))
+    # Maximum number of messages to keep in history
+    # Reduced to 15 to prevent context overflow
+    MAX_CONVERSATION_MESSAGES: int = int(os.getenv("MAX_CONVERSATION_MESSAGES", "15"))
+    # Minimum messages to always keep (even if over token limit)
+    # Reduced to 4 for more aggressive truncation when needed
+    MIN_CONVERSATION_MESSAGES: int = int(os.getenv("MIN_CONVERSATION_MESSAGES", "4"))
+    
+    # Turn Detection
+    # Enable ML-based multilingual turn detection (requires model download from HuggingFace).
+    # If False or unavailable, falls back to VAD-based detection (recommended for production).
+    # Default: False (VAD-first approach for reliability and determinism).
+    ENABLE_ML_TURN_DETECTION: bool = False
+    
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT: str = os.getenv(
+        "LOG_FORMAT",
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
+    @classmethod
+    def from_env(cls) -> "Config":
+        """
+        Create configuration from environment variables.
+        
+        Returns:
+            Configured Config instance
+            
+        Raises:
+            ValueError: If required environment variables are missing
+        """
+        # Validate required LiveKit variables
+        livekit_api_key = os.getenv("LIVEKIT_API_KEY")
+        livekit_api_secret = os.getenv("LIVEKIT_API_SECRET")
+        livekit_url = os.getenv("LIVEKIT_URL")
+        
+        if not livekit_api_key:
+            raise ValueError("LIVEKIT_API_KEY environment variable is required")
+        if not livekit_api_secret:
+            raise ValueError("LIVEKIT_API_SECRET environment variable is required")
+        if not livekit_url:
+            raise ValueError("LIVEKIT_URL environment variable is required")
+        
+        # Validate required OpenAI/Self-hosted API variables
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_base_url = os.getenv("OPENAI_BASE_URL")
+        tts_base_url = os.getenv("TTS_BASE_URL")
+        stt_base_url = os.getenv("STT_BASE_URL")
+        
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+        if not openai_base_url:
+            raise ValueError("OPENAI_BASE_URL environment variable is required")
+        if not tts_base_url:
+            raise ValueError("TTS_BASE_URL environment variable is required")
+        if not stt_base_url:
+            raise ValueError("STT_BASE_URL environment variable is required")
+        
+        # Validate Supabase variables
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url:
+            raise ValueError("SUPABASE_URL environment variable is required")
+        if not supabase_key:
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable is required")
+        
+        # SMTP configuration (optional)
+        smtp_port = os.getenv("SMTP_PORT", "587")
+        smtp_secure = os.getenv("SMTP_SECURE", "false").lower() == "true" or smtp_port == "465"
+        
+        return cls(
+            livekit=LiveKitConfig(
+                api_key=livekit_api_key,
+                api_secret=livekit_api_secret,
+                url=livekit_url,
+                agent_name=os.getenv("LIVEKIT_AGENT_NAME", "my-interviewer"),
+            ),
+            openai=OpenAIConfig(
+                api_key=openai_api_key,
+                llm_base_url=openai_base_url,
+                tts_base_url=tts_base_url,
+                stt_base_url=stt_base_url,
+                llm_model=os.getenv("OPENAI_LLM_MODEL", "qwen2-5-7b-instruct"),
+                tts_model=os.getenv("OPENAI_TTS_MODEL", "kokoro"),
+                stt_model=os.getenv("OPENAI_STT_MODEL", "small.en"),
+                tts_voice=os.getenv("OPENAI_TTS_VOICE", "af_bella"),
+                # Enable/disable flags for self-hosted services
+                stt_enabled=os.getenv("SELF_HOSTED_STT_ENABLED", "true").lower() == "true",
+                llm_enabled=os.getenv("SELF_HOSTED_LLM_ENABLED", "true").lower() == "true",
+                tts_enabled=os.getenv("SELF_HOSTED_TTS_ENABLED", "true").lower() == "true",
+            ),
+            silero_vad=SileroVADConfig(
+                min_speech_duration=float(os.getenv("SILERO_MIN_SPEECH_DURATION", "0.3")),
+                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "0.8")),
+                activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.6")),
+            ),
+            deepgram_stt=DeepgramConfig(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                enabled=os.getenv("DEEPGRAM_STT_ENABLED", "false").lower() == "true",
+            ),
+            elevenlabs_stt=ElevenLabsConfig(
+                api_key=os.getenv("ELEVENLABS_STT_API_KEY"),
+                enabled=os.getenv("ELEVENLABS_STT_ENABLED", "false").lower() == "true",
+            ),
+            gemini_llm=GeminiConfig(
+                api_key=os.getenv("GEMINI_API_KEY"),
+                model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+                enabled=os.getenv("GEMINI_LLM_ENABLED", "false").lower() == "true",
+            ),
+            elevenlabs_tts=ElevenLabsTTSConfig(
+                api_key=os.getenv("ELEVENLABS_TTS_API_KEY"),
+                voice_id=os.getenv("ELEVENLABS_TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+                enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
+            ),
+            supabase=SupabaseConfig(
+                url=supabase_url,
+                service_role_key=supabase_key,
+            ),
+            smtp=SMTPConfig(
+                host=os.getenv("SMTP_HOST"),
+                port=int(smtp_port),
+                secure=smtp_secure,
+                user=os.getenv("SMTP_USER"),
+                password=os.getenv("SMTP_PASSWORD"),
+                from_name=os.getenv("SMTP_FROM_NAME", "Sreedhar's CCE Team"),
+                from_email=os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER"),
+            ),
+            server=ServerConfig(
+                host=os.getenv("SERVER_HOST", "0.0.0.0"),
+                port=int(os.getenv("SERVER_PORT", "8000")),
+                frontend_url=os.getenv("NEXT_PUBLIC_APP_URL") or os.getenv("FRONTEND_URL", ""),
+            ),
+            MAX_APPLICATION_LENGTH=int(os.getenv("MAX_APPLICATION_LENGTH", "3000")),
+            ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",
+        )
+
+
+
+
+def get_config() -> Config:
+    """
+    Get configuration from environment variables.
+    
+    Returns:
+        Configuration instance
+    """
+    return Config.from_env()
+

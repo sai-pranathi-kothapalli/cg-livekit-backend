@@ -1,0 +1,135 @@
+# Core Framework
+aiofiles==25.1.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.2
+aiosignal==1.4.0
+annotated-types==0.7.0
+anyio==4.12.0
+attrs==25.4.0
+av==15.1.0
+cachetools==6.2.4
+certifi==2025.11.12
+cffi==2.0.0
+charset-normalizer==3.4.4
+click==8.1.8
+colorama==0.4.6
+coloredlogs==15.0.1
+distro==1.9.0
+docstring_parser==0.17.0
+eval_type_backport==0.3.1
+filelock==3.19.1
+flatbuffers==25.12.19
+frozenlist==1.8.0
+fsspec==2025.10.0
+google-api-core==2.28.1
+google-auth==2.45.0
+google-cloud-speech==2.35.0
+google-cloud-texttospeech==2.33.0
+google-genai==1.47.0
+googleapis-common-protos==1.72.0
+grpcio==1.76.0
+grpcio-status==1.76.0
+h11==0.16.0
+hf-xet==1.2.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==0.36.0
+humanfriendly==10.0
+idna==3.11
+importlib_metadata==8.7.1
+Jinja2==3.1.6
+jiter==0.12.0
+livekit==1.0.23
+livekit-agents==1.3.6
+livekit-api==1.1.0
+livekit-blingfire==1.1.0
+# Cloud service plugins (optional fallbacks - only used when enabled in .env)
+livekit-plugins-elevenlabs==1.3.6    # ElevenLabs STT + TTS fallback
+livekit-plugins-google==1.3.6        # Google Gemini LLM fallback
+livekit-plugins-noise-cancellation==0.2.5
+livekit-plugins-silero==1.3.6
+# Tavus removed - using OpenAI TTS only
+# livekit-plugins-tavus==1.3.6
+# Turn detector removed - using VAD-based detection only
+# livekit-plugins-turn-detector==1.3.6
+livekit-protocol==1.1.1
+markdown-it-py==3.0.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mpmath==1.3.0
+multidict==6.7.0
+nest-asyncio==1.6.0
+numpy<2.0
+onnxruntime==1.19.2
+livekit-plugins-openai==1.3.6
+openai==2.14.0
+opentelemetry-api==1.39.1
+opentelemetry-exporter-otlp==1.39.1
+opentelemetry-exporter-otlp-proto-common==1.39.1
+opentelemetry-exporter-otlp-proto-grpc==1.39.1
+opentelemetry-exporter-otlp-proto-http==1.39.1
+opentelemetry-proto==1.39.1
+opentelemetry-sdk==1.39.1
+opentelemetry-semantic-conventions==0.60b1
+packaging==25.0
+pillow==11.3.0
+prometheus_client==0.23.1
+propcache==0.4.1
+proto-plus==1.27.0
+protobuf==6.33.2
+psutil==7.2.0
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+pycparser==2.23
+pydantic==2.12.5
+pydantic_core==2.41.5
+Pygments==2.19.2
+PyJWT==2.10.1
+python-dotenv==1.2.1
+PyYAML==6.0.3
+regex==2025.11.3
+requests==2.32.5
+rich==14.2.0
+rsa==4.9.1
+safetensors==0.7.0
+shellingham==1.5.4
+sniffio==1.3.1
+sounddevice==0.5.3
+sympy==1.14.0
+tenacity==9.1.2
+tokenizers==0.22.1
+tqdm==4.67.1
+transformers==4.57.1
+typer==0.21.0
+types-protobuf==6.32.1.20251210
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.6.2
+watchfiles==1.1.1
+websockets==15.0.1
+yarl==1.22.0
+zipp==3.23.0
+
+# FastAPI and HTTP server
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.9
+
+# Supabase client
+supabase>=2.10.0
+postgrest
+
+# Resume processing
+pypdf2==3.0.1
+python-docx==1.1.2
+
+# Email
+aiosmtplib==3.0.2
+email-validator==2.2.0
+
+# Excel processing for bulk registration
+pandas>=2.1.4,<2.2.0
+openpyxl==3.1.2
+
+# Password hashing for admin authentication
+bcrypt==5.0.0
