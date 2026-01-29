@@ -187,20 +187,75 @@ class ResumeService:
                 base_url=self.config.openai.llm_base_url,
             )
             
-            # Fetch dynamic prompt
-            from app.services.prompt_service import get_prompt_service
-            prompt_service = get_prompt_service(self.config)
-            base_prompt = await prompt_service.get_prompt(
-                "resume_extraction",
-                default_content="Extract the following information from the resume/application text into a JSON object."
-            )
-            
-            prompt = f"""
-            {base_prompt}
-            
-            Text to process:
-            {text}
-            """
+            # Create comprehensive prompt for extracting all application form fields
+            prompt = f"""Extract all application form information from the following text and return as JSON.
+
+Extract the following fields (use null if not found):
+
+PERSONAL DETAILS:
+- full_name (or name)
+- post
+- category
+- date_of_birth (or dob) - format as YYYY-MM-DD if possible
+- gender
+- marital_status
+- aadhaar_number (or aadhaar)
+- pan_number (or pan)
+- father_name (or father)
+- mother_name (or mother)
+- spouse_name (or spouse) - only if married
+
+ADDRESS DETAILS:
+- correspondence_address1 (or correspondence_address)
+- correspondence_address2
+- correspondence_address3
+- correspondence_state
+- correspondence_district
+- correspondence_pincode (or correspondence_pin)
+- permanent_address1 (or permanent_address)
+- permanent_address2
+- permanent_address3
+- permanent_state
+- permanent_district
+- permanent_pincode (or permanent_pin)
+
+CONTACT:
+- mobile_number (or phone, mobile)
+- alternative_number (or alternate_phone)
+
+EDUCATIONAL QUALIFICATION:
+- ssc_board
+- ssc_passing_date
+- ssc_percentage
+- ssc_class
+- graduation_degree (or degree)
+- graduation_college (or college)
+- graduation_specialization (or specialization)
+- graduation_passing_date
+- graduation_percentage
+- graduation_class
+
+OTHER DETAILS:
+- religion
+- religious_minority (boolean)
+- local_language_studied (boolean)
+- local_language_name
+- computer_knowledge (boolean)
+- computer_knowledge_details
+- languages_known (object with language names as keys)
+
+APPLICATION SPECIFIC:
+- state_applying_for (or state)
+- regional_rural_bank (or rrb)
+- exam_center_preference1
+- exam_center_preference2
+- medium_of_paper
+
+Return ONLY valid JSON. Use null for missing fields. For boolean fields, use true/false.
+
+Text to extract from:
+{text[:8000]}  # Limit text to avoid token limits
+"""
             
             response = await client.chat.completions.create(
                 model=self.config.openai.llm_model,

@@ -51,38 +51,63 @@ class ApplicationFormService:
     def get_form_by_user_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetch application form for a user.
+        
+        Args:
+            user_id: enrolled_users.id
         """
         try:
-            result = self.supabase.table('student_application_forms').select("*").eq("student_id", user_id).execute()
+            result = self.supabase.table('student_application_forms')\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .execute()
             if result.data and len(result.data) > 0:
                 return result.data[0]
             return None
         except Exception as e:
-            logger.error(f"Error fetching form: {e}")
+            logger.error(f"Error fetching form: {e}", exc_info=True)
             return None
 
-    def create_or_update_form(self, student_id: str, data: Dict[str, Any], status: str = 'draft') -> Dict[str, Any]:
+    def create_or_update_form(self, user_id: str, data: Dict[str, Any], status: str = 'submitted') -> Dict[str, Any]:
         """
         Upsert an application form.
+        Stores data directly in database columns (not nested in 'data' field).
+        
+        Args:
+            user_id: enrolled_users.id (not student_id)
+            data: Dictionary with field names matching database columns
+            status: Form status ('draft', 'submitted', 'verified', 'rejected')
         """
         try:
-            existing = self.get_form_by_user_id(student_id)
+            # Check if form exists by user_id
+            existing = self.get_form_by_user_id(user_id)
+            
+            # Prepare form data - store fields directly as columns
             form_data = {
-                "student_id": student_id,
-                "data": data,
+                "user_id": user_id,
                 "status": status,
-                "updated_at": get_now_ist().isoformat()
+                "updated_at": get_now_ist().isoformat(),
+                **data  # Spread all fields directly into form_data
             }
             
             if existing:
-                result = self.supabase.table('student_application_forms').update(form_data).eq("student_id", student_id).execute()
+                # Update existing form
+                result = self.supabase.table('student_application_forms')\
+                    .update(form_data)\
+                    .eq("user_id", user_id)\
+                    .execute()
             else:
+                # Create new form
                 form_data["created_at"] = get_now_ist().isoformat()
-                result = self.supabase.table('student_application_forms').insert(form_data).execute()
+                if status == 'submitted':
+                    form_data["submitted_at"] = get_now_ist().isoformat()
+                result = self.supabase.table('student_application_forms')\
+                    .insert(form_data)\
+                    .execute()
                 
             if result.data and len(result.data) > 0:
+                logger.info(f"✅ Application form {'updated' if existing else 'created'} for user {user_id}")
                 return result.data[0]
             raise AgentError("Failed to upsert form in Supabase", "ApplicationFormService")
         except Exception as e:
-            logger.error(f"Error upserting form: {e}")
+            logger.error(f"Error upserting form: {e}", exc_info=True)
             raise AgentError(f"Failed to upsert form: {str(e)}", "ApplicationFormService")

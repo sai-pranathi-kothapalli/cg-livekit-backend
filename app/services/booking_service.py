@@ -15,7 +15,7 @@ from supabase import create_client, Client
 from app.config import Config
 from app.utils.logger import get_logger
 from app.utils.exceptions import AgentError
-from app.utils.datetime_utils import IST, get_now_ist, to_ist
+from app.utils.datetime_utils import IST, get_now_ist, to_ist, parse_datetime_safe
 
 logger = get_logger(__name__)
 
@@ -79,11 +79,21 @@ class BookingService:
     def get_booking(self, token: str) -> Optional[Dict[str, Any]]:
         """
         Fetch a booking by token from Supabase.
+        Converts scheduled_at to IST timezone for consistency.
         """
         try:
             result = self.supabase.table('interview_bookings').select("*").eq("token", token).execute()
             if result.data and len(result.data) > 0:
-                return result.data[0]
+                booking = result.data[0]
+                # Convert scheduled_at to IST if present
+                if booking.get('scheduled_at'):
+                    try:
+                        scheduled_at_str = booking['scheduled_at']
+                        scheduled_at_ist = parse_datetime_safe(scheduled_at_str)
+                        booking['scheduled_at'] = scheduled_at_ist.isoformat()
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not convert scheduled_at to IST for booking {token}: {e}")
+                return booking
             return None
         except Exception as e:
             logger.error(f"Error fetching booking: {e}")
@@ -92,10 +102,22 @@ class BookingService:
     def get_all_bookings(self) -> List[Dict[str, Any]]:
         """
         Fetch all bookings from Supabase.
+        Converts scheduled_at to IST timezone for consistency.
         """
         try:
             result = self.supabase.table('interview_bookings').select("*").execute()
-            return result.data if result.data else []
+            if result.data:
+                # Convert scheduled_at to IST for each booking
+                for booking in result.data:
+                    if booking.get('scheduled_at'):
+                        try:
+                            scheduled_at_str = booking['scheduled_at']
+                            scheduled_at_ist = parse_datetime_safe(scheduled_at_str)
+                            booking['scheduled_at'] = scheduled_at_ist.isoformat()
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Could not convert scheduled_at to IST for booking {booking.get('token', 'unknown')}: {e}")
+                return result.data
+            return []
         except Exception as e:
             logger.error(f"Error fetching all bookings: {e}")
             return []

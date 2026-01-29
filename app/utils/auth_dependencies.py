@@ -139,3 +139,32 @@ def get_optional_user(
     
     return None
 
+
+async def get_optional_student(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    auth_service: AuthService = Depends(get_auth_service)
+) -> Optional[dict]:
+    """
+    Get current student user if token is provided, otherwise return None.
+    Used for endpoints that require student authentication when accessing interviews.
+    """
+    if not credentials:
+        return None
+    
+    token = credentials.credentials
+    payload = auth_service.verify_token(token)
+    
+    if not payload:
+        return None
+    
+    user_id = payload.get('user_id')
+    role = payload.get('role')
+    
+    if not user_id or not role:
+        return None
+    
+    # Only return if role is student
+    if role != 'student':
+        return None
+    
+    return auth_service.get_student_by_id(user_id)

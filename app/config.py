@@ -78,6 +78,22 @@ class GeminiConfig:
 
 
 @dataclass
+class GrokConfig:
+    """xAI Grok LLM configuration (cloud fallback)"""
+    api_key: Optional[str] = None
+    model: str = "grok-2-1212"
+    enabled: bool = False
+
+
+@dataclass
+class OrchestratorConfig:
+    """Skillifire Orchestrator LLM configuration (primary LLM via orchestrator API)"""
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None  # ORCH_API_KEY: required when orchestrator has ORCH_API_KEY set
+    enabled: bool = False
+
+
+@dataclass
 class ElevenLabsTTSConfig:
     """ElevenLabs TTS configuration (cloud fallback)"""
     api_key: Optional[str] = None
@@ -135,7 +151,9 @@ class Config:
     deepgram_stt: DeepgramConfig         # STT cloud service
     elevenlabs_stt: ElevenLabsConfig     # STT fallback (secondary)
     elevenlabs_tts: ElevenLabsTTSConfig  # TTS fallback
-    gemini_llm: GeminiConfig             # LLM fallback
+    gemini_llm: GeminiConfig             # LLM fallback (legacy)
+    grok_llm: GrokConfig                  # LLM fallback (Grok/xAI)
+    orchestrator_llm: OrchestratorConfig  # LLM via orchestrator (primary, replaces direct LLM calls)
     
     # Supabase configuration
     supabase: SupabaseConfig
@@ -165,6 +183,11 @@ class Config:
     # If False or unavailable, falls back to VAD-based detection (recommended for production).
     # Default: False (VAD-first approach for reliability and determinism).
     ENABLE_ML_TURN_DETECTION: bool = False
+    
+    # Interview link access
+    # If True: only logged-in students can open interview link (token must match their booking).
+    # If False: anyone with the link (token) can open and attend the interview without logging in.
+    REQUIRE_LOGIN_FOR_INTERVIEW: bool = True
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -262,6 +285,16 @@ class Config:
                 model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
                 enabled=os.getenv("GEMINI_LLM_ENABLED", "false").lower() == "true",
             ),
+            grok_llm=GrokConfig(
+                api_key=os.getenv("XAI_API_KEY"),
+                model=os.getenv("GROK_MODEL", "grok-2-1212"),
+                enabled=os.getenv("GROK_LLM_ENABLED", "false").lower() == "true",
+            ),
+            orchestrator_llm=OrchestratorConfig(
+                base_url=os.getenv("ORCHESTRATOR_BASE_URL"),
+                api_key=os.getenv("ORCH_API_KEY") or None,
+                enabled=os.getenv("ORCHESTRATOR_LLM_ENABLED", "false").lower() == "true",
+            ),
             elevenlabs_tts=ElevenLabsTTSConfig(
                 api_key=os.getenv("ELEVENLABS_TTS_API_KEY"),
                 voice_id=os.getenv("ELEVENLABS_TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
@@ -287,6 +320,7 @@ class Config:
             ),
             MAX_APPLICATION_LENGTH=int(os.getenv("MAX_APPLICATION_LENGTH", "3000")),
             ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",
+            REQUIRE_LOGIN_FOR_INTERVIEW=os.getenv("REQUIRE_LOGIN_FOR_INTERVIEW", "true").lower() == "true",
         )
 
 

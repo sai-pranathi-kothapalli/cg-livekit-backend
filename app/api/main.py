@@ -31,9 +31,11 @@ from app.services.user_service import UserService
 from app.services.slot_service import SlotService
 from app.services.assignment_service import AssignmentService
 from app.services.application_form_service import ApplicationFormService
+from app.services.transcript_storage_service import TranscriptStorageService
+from app.services.evaluation_service import EvaluationService
 from app.utils.logger import get_logger
-from app.utils.auth_dependencies import get_current_admin, get_current_student
-from app.utils.datetime_utils import IST, get_now_ist, to_ist
+from app.utils.auth_dependencies import get_current_admin, get_current_student, get_optional_student
+from app.utils.datetime_utils import IST, get_now_ist, to_ist, parse_datetime_safe
 
 logger = get_logger(__name__)
 config = get_config()
@@ -45,13 +47,24 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware
+# CORS middleware: with allow_credentials=True, origins cannot be "*" (must be explicit).
+# Include localhost (dev) and allow cloudflared tunnel origins so frontend works from tunnel too.
+_cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+if config.server.frontend_url:
+    _cors_origins.append(config.server.frontend_url.rstrip("/"))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify allowed origins
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https?://[a-z0-9-]+\.trycloudflare\.com",  # cloudflared tunnel URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Initialize services
@@ -65,6 +78,8 @@ user_service = UserService(config)
 slot_service = SlotService(config)
 assignment_service = AssignmentService(config)
 application_form_service = ApplicationFormService(config)
+transcript_storage_service = TranscriptStorageService(config)
+evaluation_service = EvaluationService(config)
 
 
 # Helper function to get frontend URL from request dynamically
@@ -153,9 +168,34 @@ class BookingResponse(BaseModel):
     email: str
     phone: Optional[str] = None
     scheduled_at: str
+    slot_id: Optional[str] = None
+    slot: Optional[dict] = None  # Include slot data if available
     created_at: str
     application_text: Optional[str] = None
     application_url: Optional[str] = None
+
+
+class RoundEvaluationResponse(BaseModel):
+    round_number: int
+    round_name: str
+    questions_asked: int
+    average_rating: Optional[float] = None
+    time_spent_minutes: Optional[float] = None
+    time_target_minutes: Optional[int] = None
+    topics_covered: List[str] = []
+    performance_summary: Optional[str] = None
+    response_ratings: List[float] = []
+
+
+class EvaluationResponse(BaseModel):
+    booking: BookingResponse
+    candidate: Dict[str, Any]
+    interview_metrics: Optional[Dict[str, Any]] = None
+    rounds: List[RoundEvaluationResponse] = []
+    overall_score: Optional[float] = None
+    strengths: List[str] = []
+    areas_for_improvement: List[str] = []
+    transcript: List[Dict[str, Any]] = []
 
 
 class ConnectionDetailsRequest(BaseModel):
@@ -310,6 +350,22 @@ class ChangePasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: str
     new_password: str
+
+
+class InterviewAccessConfigResponse(BaseModel):
+    """Public config: whether interview link requires login (for frontend to show/hide login gate)."""
+    require_login_for_interview: bool
+
+
+@app.get("/api/public/interview-config", response_model=InterviewAccessConfigResponse)
+async def get_interview_access_config():
+    """
+    Public endpoint (no auth). Returns whether interview links require login.
+    Frontend uses this to decide whether to redirect to login or allow direct access.
+    """
+    return InterviewAccessConfigResponse(
+        require_login_for_interview=config.REQUIRE_LOGIN_FOR_INTERVIEW,
+    )
 
 
 @app.post("/api/login", response_model=LoginResponse)
@@ -712,11 +768,25 @@ async def schedule_interview(request: ScheduleInterviewRequest, http_request: Re
 
 
 @app.get("/api/booking/{token}", response_model=BookingResponse)
-async def get_booking(token: str):
+async def get_booking(
+    token: str,
+    current_student: Optional[dict] = Depends(get_optional_student)
+):
     """
     Get booking details by token.
+    
+    When REQUIRE_LOGIN_FOR_INTERVIEW=true: requires student authentication and verifies ownership.
+    When REQUIRE_LOGIN_FOR_INTERVIEW=false: anyone with the token can get booking details.
     """
     try:
+        # Optional: Require student authentication (configurable)
+        if config.REQUIRE_LOGIN_FOR_INTERVIEW:
+            if not current_student:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication required to access interview. Please log in as a student."
+                )
+        
         booking = booking_service.get_booking(token)
         
         if not booking:
@@ -725,7 +795,42 @@ async def get_booking(token: str):
                 detail="Booking not found"
             )
         
-        return BookingResponse(**booking)
+        # Optional: Verify that the booking belongs to the logged-in student (only when login required)
+        if config.REQUIRE_LOGIN_FOR_INTERVIEW and current_student:
+            booking_user_id = booking.get('user_id')
+            if booking_user_id:
+                # Get enrolled_user ID from student email
+                student_email = current_student.get('email')
+                enrolled_user = user_service.get_user_by_email(student_email)
+                
+                if not enrolled_user:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="User not found in enrolled users"
+                    )
+                
+                enrolled_user_id = enrolled_user.get('id')
+                if booking_user_id != enrolled_user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You do not have permission to access this interview"
+                    )
+            else:
+                # If booking has no user_id, allow access (for backward compatibility)
+                logger.warning(f"[API] ⚠️  Booking {token} has no user_id - allowing access for backward compatibility")
+        
+        # Include slot data if booking has slot_id
+        booking_dict = dict(booking)
+        slot_id = booking_dict.get('slot_id')
+        if slot_id:
+            try:
+                slot = slot_service.get_slot(slot_id)
+                if slot:
+                    booking_dict['slot'] = slot
+            except Exception as e:
+                logger.warning(f"[API] Failed to fetch slot {slot_id}: {e}")
+        
+        return BookingResponse(**booking_dict)
         
     except HTTPException:
         raise
@@ -738,12 +843,148 @@ async def get_booking(token: str):
         )
 
 
+@app.get("/api/orchestrator/session/{session_id}/full")
+async def get_orchestrator_session_full(session_id: str):
+    """
+    Proxy to remote orchestrator GET /session/{session_id}/full.
+    Used by frontend to fetch full session (messages, permanent_context, evaluation) when
+    orchestrator has ORCH_API_KEY set. Backend sends Bearer token so frontend does not need the key.
+    """
+    base_url = (config.orchestrator_llm.base_url or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestrator not configured (ORCHESTRATOR_BASE_URL missing)",
+        )
+    api_key = config.orchestrator_llm.api_key
+    import httpx
+    try:
+        url = f"{base_url}/session/{session_id}/full"
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=e.response.text or "Orchestrator error",
+        )
+    except Exception as e:
+        logger.error(f"[API] Orchestrator proxy error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch from orchestrator: {str(e)}",
+        )
+
+
+@app.get("/api/evaluation/{token}", response_model=EvaluationResponse)
+async def get_evaluation(token: str):
+    """
+    Get comprehensive evaluation data for an interview.
+    
+    Returns:
+        Complete evaluation including transcript, metrics, rounds, and scores
+    """
+    try:
+        # Get booking
+        booking = booking_service.get_booking(token)
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Interview not found"
+            )
+        
+        # Get transcript
+        transcript = transcript_storage_service.get_transcript(token)
+        
+        # Get evaluation
+        evaluation = evaluation_service.get_evaluation(token)
+        
+        # If evaluation doesn't exist, try to create one from transcript
+        if not evaluation and transcript:
+            logger.info(f"Evaluation not found for {token}, calculating from transcript...")
+            evaluation_id = evaluation_service.calculate_evaluation_from_transcript(
+                booking_token=token,
+                room_name=booking.get('room_name') or f"room_{token}",
+                transcript=transcript,
+            )
+            if evaluation_id:
+                evaluation = evaluation_service.get_evaluation(token)
+        
+        # Format response
+        candidate_data = {
+            "name": booking.get("name", ""),
+            "email": booking.get("email", ""),
+            "application_form": {
+                "text": booking.get("application_text"),
+                "url": booking.get("application_url"),
+            } if booking.get("application_text") else None,
+        }
+        
+        # Build interview metrics
+        interview_metrics = None
+        if evaluation:
+            interview_metrics = {
+                "duration_minutes": evaluation.get("duration_minutes"),
+                "rounds_completed": evaluation.get("rounds_completed", 0),
+                "total_questions": evaluation.get("total_questions", 0),
+                "average_response_time": None,  # Can be calculated from transcript timestamps
+            }
+        
+        # Format rounds
+        rounds = []
+        if evaluation and evaluation.get("rounds"):
+            for round_data in evaluation["rounds"]:
+                rounds.append(RoundEvaluationResponse(
+                    round_number=round_data.get("round_number", 0),
+                    round_name=round_data.get("round_name", ""),
+                    questions_asked=round_data.get("questions_asked", 0),
+                    average_rating=round_data.get("average_rating"),
+                    time_spent_minutes=round_data.get("time_spent_minutes"),
+                    time_target_minutes=round_data.get("time_target_minutes"),
+                    topics_covered=round_data.get("topics_covered", []),
+                    performance_summary=round_data.get("performance_summary"),
+                    response_ratings=round_data.get("response_ratings", []),
+                ))
+        
+        return EvaluationResponse(
+            booking=BookingResponse(**booking),
+            candidate=candidate_data,
+            interview_metrics=interview_metrics,
+            rounds=rounds,
+            overall_score=evaluation.get("overall_score") if evaluation else None,
+            strengths=evaluation.get("strengths", []) if evaluation else [],
+            areas_for_improvement=evaluation.get("areas_for_improvement", []) if evaluation else [],
+            transcript=transcript,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Failed to fetch evaluation: {str(e)}"
+        logger.error(f"[API] {error_msg}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+
 @app.post("/api/connection-details", response_model=ConnectionDetailsResponse)
-async def connection_details(request: ConnectionDetailsRequest):
+async def connection_details(
+    request: ConnectionDetailsRequest,
+    current_student: Optional[dict] = Depends(get_optional_student)
+):
     """
     Generate LiveKit connection details for interview.
     
     Creates a participant token and room configuration with agent.
+    
+    If a token is provided, requires student authentication and verifies ownership.
     """
     try:
         # Validate LiveKit config
@@ -802,6 +1043,16 @@ async def connection_details(request: ConnectionDetailsRequest):
         # If token is provided, fetch booking to get application text and validate time window
         application_text = None
         if request.token:
+            # Optional: Require student login to open interview link (configurable)
+            if config.REQUIRE_LOGIN_FOR_INTERVIEW:
+                if not current_student:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Authentication required to access interview. Please log in as a student."
+                    )
+            else:
+                logger.info("[API] Interview link open to anyone (REQUIRE_LOGIN_FOR_INTERVIEW=false)")
+            
             try:
                 booking = booking_service.get_booking(request.token)
                 if not booking:
@@ -810,45 +1061,96 @@ async def connection_details(request: ConnectionDetailsRequest):
                         detail="Interview not found"
                     )
                 
-                # Validate interview time window (can join from scheduled time to 1 hour after)
+                # Optional: Verify that the booking belongs to the logged-in student (only when login required)
+                if config.REQUIRE_LOGIN_FOR_INTERVIEW and current_student:
+                    booking_user_id = booking.get('user_id')
+                    if booking_user_id:
+                        # Get enrolled_user ID from student email
+                        student_email = current_student.get('email')
+                        enrolled_user = user_service.get_user_by_email(student_email)
+                        
+                        if not enrolled_user:
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="User not found in enrolled users"
+                            )
+                        
+                        enrolled_user_id = enrolled_user.get('id')
+                        if booking_user_id != enrolled_user_id:
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="You do not have permission to access this interview"
+                            )
+                        
+                        logger.info(f"[API] ✅ Verified interview ownership: booking.user_id={booking_user_id}, student.user_id={enrolled_user_id}")
+                    else:
+                        # If booking has no user_id, allow access (for backward compatibility with old bookings)
+                        logger.warning(f"[API] ⚠️  Booking {request.token} has no user_id - allowing access for backward compatibility")
+                
+                # Validate interview time window (can only join during the scheduled interview time)
                 if booking.get("scheduled_at"):
                     scheduled_at_str = booking["scheduled_at"]
-                    # Parse scheduled_at (handle both ISO format and other formats)
+                    # Parse scheduled_at - handle UTC or IST format properly
                     try:
-                        if 'Z' in scheduled_at_str or '+00:00' in scheduled_at_str:
-                            scheduled_at = datetime.fromisoformat(scheduled_at_str.replace('Z', '+00:00'))
-                            scheduled_at = scheduled_at.astimezone(IST)
-                        else:
-                            scheduled_at = datetime.fromisoformat(scheduled_at_str)
-                            if scheduled_at.tzinfo is None:
-                                scheduled_at = scheduled_at.replace(tzinfo=IST)
-                    except ValueError:
-                        # Try parsing without timezone
+                        scheduled_at = parse_datetime_safe(scheduled_at_str)
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"[API] Failed to parse scheduled_at: {e}, using fallback")
+                        # Fallback: try parsing without timezone
                         naive_dt = datetime.fromisoformat(scheduled_at_str.replace('Z', '').replace('+00:00', ''))
                         scheduled_at = naive_dt.replace(tzinfo=IST)
                     
                     now = get_now_ist()
-                    one_hour_after = scheduled_at + timedelta(hours=1)
+                    
+                    # Get interview duration from slot if available, otherwise default to 30 minutes
+                    duration_minutes = 30  # Default duration
+                    slot_id = booking.get("slot_id")
+                    if slot_id:
+                        try:
+                            slot = slot_service.get_slot(slot_id)
+                            logger.info(f"[API] Slot retrieved for connection-details: slot_id={slot_id}, duration_minutes={slot.get('duration_minutes') if slot else 'N/A'}, slot_keys={list(slot.keys()) if slot else 'N/A'}")
+                            if slot and slot.get("duration_minutes"):
+                                duration_minutes = slot["duration_minutes"]
+                                logger.info(f"[API] Using duration_minutes from slot: {duration_minutes} minutes")
+                            elif slot:
+                                # Calculate duration from slot start and end times if available
+                                slot_datetime_str = slot.get("slot_datetime")
+                                if slot_datetime_str:
+                                    try:
+                                        slot_start = parse_datetime_safe(slot_datetime_str)
+                                        
+                                        # Get end time from slot or calculate
+                                        slot_end_str = slot.get("end_time")
+                                        if slot_end_str:
+                                            slot_end = parse_datetime_safe(slot_end_str)
+                                            duration_minutes = int((slot_end - slot_start).total_seconds() / 60)
+                                            logger.info(f"[API] Calculated duration_minutes from slot times: {duration_minutes} minutes")
+                                    except (ValueError, TypeError) as e:
+                                        logger.warning(f"[API] Failed to parse slot times: {e}")
+                                        pass
+                            else:
+                                logger.warning(f"[API] Slot not found for slot_id: {slot_id}")
+                        except Exception as e:
+                            logger.warning(f"[API] Failed to get slot duration: {e}")
+                    else:
+                        logger.warning(f"[API] No slot_id in booking, using default duration: 30 minutes")
+                    
+                    interview_end_time = scheduled_at + timedelta(minutes=duration_minutes)
                     
                     # Check if current time is before scheduled time
-                    # [DEVELOPMENT BYPASS] Allow joining early for testing
-                    # if now < scheduled_at:
-                    #     raise HTTPException(
-                    #         status_code=status.HTTP_400_BAD_REQUEST,
-                    #         detail=f"Interview has not started yet. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
-                    #     )
-                    pass
+                    if now < scheduled_at:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Interview has not started yet. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                        )
                     
-                    # Check if current time is more than 1 hour after scheduled time
-                    # [DEVELOPMENT BYPASS] Allow joining even if expired
-                    # if now > one_hour_after:
-                    #     raise HTTPException(
-                    #         status_code=status.HTTP_400_BAD_REQUEST,
-                    #         detail="Interview window has expired. You can only join from the scheduled time to 1 hour after."
-                    #     )
-                    pass
+                    # Check if current time is after interview end time
+                    if now > interview_end_time:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Interview window has expired. The interview was scheduled from {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')} to {interview_end_time.strftime('%Y-%m-%d %H:%M:%S IST')}."
+                        )
                     
-                    logger.info(f"[API] Interview time window validated: scheduled_at={scheduled_at}, now={now}, valid window: {scheduled_at} to {one_hour_after}")
+                    logger.info(f"[API] Interview time window validated: scheduled_at={scheduled_at}, end_time={interview_end_time}, now={now}, duration={duration_minutes} minutes")
                 
                 if booking.get("application_text"):
                     application_text = booking["application_text"]
@@ -2016,15 +2318,15 @@ async def schedule_interview_for_user(
                 detail=f"Slot is full. Capacity: {slot['current_bookings']}/{slot['max_capacity']}"
             )
         
-        # Parse slot datetime
+        # Parse slot datetime - handle UTC or IST format properly
         try:
             slot_datetime_str = slot.get('slot_datetime') or slot.get('start_time')
             if not slot_datetime_str:
                 raise ValueError("No start time found for slot")
             
-            scheduled_at = datetime.fromisoformat(slot_datetime_str.replace('Z', '+00:00'))
-            # Ensure it's in IST for consistent display and logic
-            scheduled_at = to_ist(scheduled_at)
+            # Use parse_datetime_safe to handle both UTC and IST formats
+            scheduled_at = parse_datetime_safe(slot_datetime_str)
+            logger.info(f"[API] Parsed slot datetime: {slot_datetime_str} -> {scheduled_at.isoformat()} (IST)")
         except (ValueError, KeyError, TypeError) as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2033,6 +2335,7 @@ async def schedule_interview_for_user(
         
         # Create booking with slot_id reference
         try:
+            logger.info(f"[API] Creating booking for user_id: {request.user_id}, email: {user['email']}, slot_id: {request.slot_id}")
             token = booking_service.create_booking(
                 name=user['name'],
                 email=user['email'],
@@ -2041,7 +2344,9 @@ async def schedule_interview_for_user(
                 application_text=None,
                 application_url=None,
                 slot_id=request.slot_id,
+                user_id=request.user_id,  # CRITICAL: Link booking to enrolled_user
             )
+            logger.info(f"[API] ✅ Booking created successfully: token={token}, user_id={request.user_id}")
         except Exception as e:
             logger.error(f"[API] Failed to create booking: {str(e)}")
             raise HTTPException(
@@ -2279,6 +2584,7 @@ async def bulk_schedule_interviews(
 class CreateSlotRequest(BaseModel):
     slot_datetime: str  # ISO format datetime string
     max_capacity: int = 30  # Default 30, but admin can change
+    duration_minutes: int = 45  # Interview duration in minutes (default 45)
     notes: Optional[str] = None
 
 
@@ -2292,6 +2598,9 @@ class UpdateSlotRequest(BaseModel):
 class SlotResponse(BaseModel):
     id: str
     slot_datetime: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    duration_minutes: Optional[int] = None  # Interview duration in minutes
     max_capacity: int
     current_bookings: int
     status: str
@@ -2310,13 +2619,22 @@ async def create_slot(
     Create a new interview slot.
     """
     try:
-        # Parse datetime
+        # Parse datetime and ensure it's in IST
         try:
-            slot_datetime = datetime.fromisoformat(request.slot_datetime.replace('Z', '+00:00'))
-        except ValueError:
+            # Parse the datetime string (may come with or without timezone)
+            slot_datetime_str = request.slot_datetime.replace('Z', '+00:00')
+            slot_datetime = datetime.fromisoformat(slot_datetime_str)
+            
+            # Convert to IST timezone
+            # If datetime is naive (no timezone), assume it's already in IST
+            # If datetime has timezone, convert it to IST
+            start_time = to_ist(slot_datetime)
+            
+            logger.info(f"[API] Slot creation - Input: {request.slot_datetime}, Parsed: {slot_datetime}, IST: {start_time}")
+        except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid datetime format. Use ISO format."
+                detail=f"Invalid datetime format. Use ISO format. Error: {str(e)}"
             )
         
         # Validate capacity
@@ -2326,16 +2644,33 @@ async def create_slot(
                 detail="Max capacity must be at least 1"
             )
         
-        # Default duration: 45 minutes if not specified
-        start_time = slot_datetime
-        end_time = start_time + timedelta(minutes=45)
+        # Validate duration
+        if request.duration_minutes < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Duration must be at least 1 minute"
+            )
+        if request.duration_minutes > 120:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Duration cannot exceed 120 minutes (2 hours)"
+            )
+        
+        # Use provided duration (default 45 minutes if not specified)
+        duration_minutes = request.duration_minutes or 45
+        end_time = start_time + timedelta(minutes=duration_minutes)
+        
+        logger.info(f"[API] Creating slot with duration: {duration_minutes} minutes (from request: {request.duration_minutes})")
         
         slot = slot_service.create_slot(
             start_time=start_time,
             end_time=end_time,
             max_bookings=request.max_capacity,
-            notes=request.notes
+            notes=request.notes,
+            duration_minutes=duration_minutes  # Pass duration explicitly
         )
+        
+        logger.info(f"[API] Slot created: id={slot.get('id')}, duration_minutes={slot.get('duration_minutes')}, stored_duration={slot.get('duration_minutes')}")
         
         return SlotResponse(**slot)
         
@@ -2411,11 +2746,16 @@ async def update_slot(
         updates = {}
         if request.slot_datetime is not None:
             try:
-                updates['slot_datetime'] = datetime.fromisoformat(request.slot_datetime.replace('Z', '+00:00'))
-            except ValueError:
+                # Parse and convert to IST
+                slot_datetime_str = request.slot_datetime.replace('Z', '+00:00')
+                slot_datetime = datetime.fromisoformat(slot_datetime_str)
+                updates['slot_datetime'] = to_ist(slot_datetime)
+                # Also update start_time if it exists
+                updates['start_time'] = to_ist(slot_datetime)
+            except ValueError as e:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid datetime format. Use ISO format."
+                    detail=f"Invalid datetime format. Use ISO format. Error: {str(e)}"
                 )
         if request.max_capacity is not None:
             if request.max_capacity < 1:
@@ -2552,10 +2892,16 @@ async def create_day_slots(
                 detail="Max capacity must be at least 1"
             )
         
-        # Create start and end datetime as naive (no timezone) - treat as local time
-        # Store directly without timezone conversion to avoid date shifts
-        start_datetime = datetime.combine(selected_date, datetime.min.time().replace(hour=start_hour, minute=start_minute))
-        end_datetime = datetime.combine(selected_date, datetime.min.time().replace(hour=end_hour, minute=end_minute))
+        # Create start and end datetime in IST timezone
+        # Admin provides time in IST, so we create it as IST-aware datetime
+        start_datetime = datetime.combine(
+            selected_date, 
+            datetime.min.time().replace(hour=start_hour, minute=start_minute)
+        ).replace(tzinfo=IST)
+        end_datetime = datetime.combine(
+            selected_date, 
+            datetime.min.time().replace(hour=end_hour, minute=end_minute)
+        ).replace(tzinfo=IST)
         
         # Ensure end time is after start time
         if end_datetime <= start_datetime:
@@ -2564,7 +2910,7 @@ async def create_day_slots(
                 detail="End time must be after start time"
             )
         
-        # Generate all slot times - all on the same date (no timezone conversion)
+        # Generate all slot times in IST
         slot_times = []
         current_time = start_datetime
         interval_delta = timedelta(minutes=request.interval_minutes)
@@ -2799,7 +3145,9 @@ async def submit_application_form(
             )
         
         # Prepare form data (convert snake_case to match database column names)
+        # Store ALL fields directly as database columns (not nested in 'data' field)
         form_data = {
+            # Personal Details
             'full_name': request.full_name,
             'post': request.post,
             'category': request.category,
@@ -2811,6 +3159,8 @@ async def submit_application_form(
             'father_name': request.father_name,
             'mother_name': request.mother_name,
             'spouse_name': request.spouse_name,
+            
+            # Address Details
             'correspondence_address1': request.correspondence_address1,
             'correspondence_address2': request.correspondence_address2,
             'correspondence_address3': request.correspondence_address3,
@@ -2821,8 +3171,15 @@ async def submit_application_form(
             'permanent_address2': request.permanent_address2,
             'permanent_address3': request.permanent_address3,
             'permanent_state': request.permanent_state,
-            'permanent_district': request.permanent_district,
+            'permanent_district': request.permanent_district,  # FIXED: Was missing!
             'permanent_pincode': request.permanent_pincode,
+            
+            # Contact Details (from enrolled user)
+            'email': student_email,  # From authenticated student
+            'mobile_number': enrolled_user.get('phone'),  # From enrolled user record
+            'alternative_number': None,  # Can be added to request model if needed
+            
+            # Educational Qualification
             'ssc_board': request.ssc_board,
             'ssc_passing_date': request.ssc_passing_date,
             'ssc_percentage': request.ssc_percentage,
@@ -2833,24 +3190,63 @@ async def submit_application_form(
             'graduation_passing_date': request.graduation_passing_date,
             'graduation_percentage': request.graduation_percentage,
             'graduation_class': request.graduation_class,
+            
+            # Other Details
             'religion': request.religion,
             'religious_minority': request.religious_minority,
             'local_language_studied': request.local_language_studied,
             'local_language_name': request.local_language_name,
             'computer_knowledge': request.computer_knowledge,
             'computer_knowledge_details': request.computer_knowledge_details,
-            'languages_known': request.languages_known,
+            'languages_known': request.languages_known,  # Stored as JSONB
+            
+            # Application Specific
             'state_applying_for': request.state_applying_for,
             'regional_rural_bank': request.regional_rural_bank,
             'exam_center_preference1': request.exam_center_preference1,
             'exam_center_preference2': request.exam_center_preference2,
             'medium_of_paper': request.medium_of_paper,
+            
+            # File Upload
             'application_file_url': request.application_file_url,
             'application_text': request.application_text,
         }
         
-        # Remove None values
-        form_data = {k: v for k, v in form_data.items() if v is not None}
+        # Convert date_of_birth string to DATE format if provided
+        if form_data.get('date_of_birth'):
+            try:
+                # Try to parse and format date string
+                date_str = form_data['date_of_birth']
+                # If it's already in YYYY-MM-DD format, keep it
+                # Otherwise try to parse common formats
+                if len(date_str) == 10 and date_str.count('-') == 2:
+                    # Already in correct format
+                    pass
+                else:
+                    # Try parsing other formats (DD/MM/YYYY, etc.)
+                    from datetime import datetime as dt
+                    # Try common formats
+                    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y']:
+                        try:
+                            parsed_date = dt.strptime(date_str, fmt)
+                            form_data['date_of_birth'] = parsed_date.strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+            except Exception as e:
+                logger.warning(f"Could not parse date_of_birth '{form_data.get('date_of_birth')}': {e}")
+        
+        # Remove None values (but keep False for boolean fields)
+        # Boolean fields should be stored even if False
+        boolean_fields = {'religious_minority', 'local_language_studied', 'computer_knowledge'}
+        form_data = {
+            k: v for k, v in form_data.items() 
+            if v is not None or k in boolean_fields
+        }
+        # Ensure boolean fields are explicitly set (False if not provided)
+        for bool_field in boolean_fields:
+            if bool_field not in form_data:
+                form_data[bool_field] = False
         
         # Create formatted application text for AI agent (if not already provided)
         if not request.application_text:
@@ -2966,21 +3362,106 @@ async def upload_application_form(
         parsed_data = {}
         if application_text:
             parsed_data = await resume_service.parse_application_data(application_text)
-            
-            # Map fields to match DB schema
-            # Resume extraction returns 'phone', but DB expects 'mobile_number'
-            if 'phone' in parsed_data:
-                parsed_data['mobile_number'] = parsed_data.pop('phone')
+            logger.info(f"[API] Parsed {len(parsed_data)} fields from PDF")
         
-        # Save form data
+        # Map parsed data to match database schema (same as manual form)
+        # This ensures consistency between manual form and PDF upload
         form_data = {
-            'full_name': enrolled_user.get('name', ''),
+            # Personal Details - from parsed data or enrolled user
+            'full_name': parsed_data.get('full_name') or parsed_data.get('name') or enrolled_user.get('name', ''),
+            'post': parsed_data.get('post'),
+            'category': parsed_data.get('category'),
+            'date_of_birth': parsed_data.get('date_of_birth') or parsed_data.get('dob'),
+            'gender': parsed_data.get('gender'),
+            'marital_status': parsed_data.get('marital_status'),
+            'aadhaar_number': parsed_data.get('aadhaar_number') or parsed_data.get('aadhaar'),
+            'pan_number': parsed_data.get('pan_number') or parsed_data.get('pan'),
+            'father_name': parsed_data.get('father_name') or parsed_data.get('father'),
+            'mother_name': parsed_data.get('mother_name') or parsed_data.get('mother'),
+            'spouse_name': parsed_data.get('spouse_name') or parsed_data.get('spouse'),
+            
+            # Address Details
+            'correspondence_address1': parsed_data.get('correspondence_address1') or parsed_data.get('correspondence_address'),
+            'correspondence_address2': parsed_data.get('correspondence_address2'),
+            'correspondence_address3': parsed_data.get('correspondence_address3'),
+            'correspondence_state': parsed_data.get('correspondence_state'),
+            'correspondence_district': parsed_data.get('correspondence_district'),
+            'correspondence_pincode': parsed_data.get('correspondence_pincode') or parsed_data.get('correspondence_pin'),
+            'permanent_address1': parsed_data.get('permanent_address1') or parsed_data.get('permanent_address'),
+            'permanent_address2': parsed_data.get('permanent_address2'),
+            'permanent_address3': parsed_data.get('permanent_address3'),
+            'permanent_state': parsed_data.get('permanent_state'),
+            'permanent_district': parsed_data.get('permanent_district'),  # Ensure this is included
+            'permanent_pincode': parsed_data.get('permanent_pincode') or parsed_data.get('permanent_pin'),
+            
+            # Contact Details (from enrolled user - consistent with manual form)
+            'email': student_email,
+            'mobile_number': parsed_data.get('mobile_number') or parsed_data.get('phone') or parsed_data.get('mobile') or enrolled_user.get('phone'),
+            'alternative_number': parsed_data.get('alternative_number') or parsed_data.get('alternate_phone'),
+            
+            # Educational Qualification
+            'ssc_board': parsed_data.get('ssc_board'),
+            'ssc_passing_date': parsed_data.get('ssc_passing_date'),
+            'ssc_percentage': parsed_data.get('ssc_percentage'),
+            'ssc_class': parsed_data.get('ssc_class'),
+            'graduation_degree': parsed_data.get('graduation_degree') or parsed_data.get('degree'),
+            'graduation_college': parsed_data.get('graduation_college') or parsed_data.get('college'),
+            'graduation_specialization': parsed_data.get('graduation_specialization') or parsed_data.get('specialization'),
+            'graduation_passing_date': parsed_data.get('graduation_passing_date'),
+            'graduation_percentage': parsed_data.get('graduation_percentage'),
+            'graduation_class': parsed_data.get('graduation_class'),
+            
+            # Other Details
+            'religion': parsed_data.get('religion'),
+            'religious_minority': parsed_data.get('religious_minority', False),
+            'local_language_studied': parsed_data.get('local_language_studied', False),
+            'local_language_name': parsed_data.get('local_language_name'),
+            'computer_knowledge': parsed_data.get('computer_knowledge', False),
+            'computer_knowledge_details': parsed_data.get('computer_knowledge_details'),
+            'languages_known': parsed_data.get('languages_known'),
+            
+            # Application Specific
+            'state_applying_for': parsed_data.get('state_applying_for') or parsed_data.get('state'),
+            'regional_rural_bank': parsed_data.get('regional_rural_bank') or parsed_data.get('rrb'),
+            'exam_center_preference1': parsed_data.get('exam_center_preference1'),
+            'exam_center_preference2': parsed_data.get('exam_center_preference2'),
+            'medium_of_paper': parsed_data.get('medium_of_paper'),
+            
+            # File Upload
             'application_file_url': application_url,
             'application_text': application_text if application_text else None,
-            **parsed_data  # Merge parsed data
         }
         
-        # Save as 'draft' so user can review/edit
+        # Convert date_of_birth string to DATE format if provided (same as manual form)
+        if form_data.get('date_of_birth'):
+            try:
+                date_str = form_data['date_of_birth']
+                if len(date_str) == 10 and date_str.count('-') == 2:
+                    pass  # Already in correct format
+                else:
+                    from datetime import datetime as dt
+                    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y']:
+                        try:
+                            parsed_date = dt.strptime(date_str, fmt)
+                            form_data['date_of_birth'] = parsed_date.strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+            except Exception as e:
+                logger.warning(f"Could not parse date_of_birth '{form_data.get('date_of_birth')}': {e}")
+        
+        # Remove None values (but keep False for boolean fields - same as manual form)
+        boolean_fields = {'religious_minority', 'local_language_studied', 'computer_knowledge'}
+        form_data = {
+            k: v for k, v in form_data.items() 
+            if v is not None or k in boolean_fields
+        }
+        # Ensure boolean fields are explicitly set
+        for bool_field in boolean_fields:
+            if bool_field not in form_data:
+                form_data[bool_field] = False
+        
+        # Save as 'draft' so user can review/edit (consistent with manual form workflow)
         form = application_form_service.create_or_update_form(
             enrolled_user['id'],
             form_data,
@@ -3195,9 +3676,9 @@ async def select_slot(
             if not slot_datetime_str:
                 raise ValueError("No start time found for slot")
                 
-            scheduled_at = datetime.fromisoformat(slot_datetime_str.replace('Z', '+00:00'))
-            # Ensure it's in IST
-            scheduled_at = to_ist(scheduled_at)
+            # Use parse_datetime_safe to handle both UTC and IST formats
+            scheduled_at = parse_datetime_safe(slot_datetime_str)
+            logger.info(f"[API] Parsed slot datetime for booking: {slot_datetime_str} -> {scheduled_at.isoformat()} (IST)")
         except (ValueError, KeyError, TypeError) as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3321,9 +3802,9 @@ async def select_slot(
 
 
 class MyInterviewResponse(BaseModel):
-    enrolled: List[AssignmentResponse]  # Assigned slots not yet selected
-    scheduled: Optional[Dict[str, Any]] = None  # Selected slot with booking details
-    completed: List[Dict[str, Any]] = []  # Past interviews
+    upcoming: List[Dict[str, Any]] = []  # All upcoming interviews (scheduled by admin)
+    missed: List[Dict[str, Any]] = []  # Past interviews that were not attended/completed
+    completed: List[Dict[str, Any]] = []  # Past interviews that were completed
 
 
 @app.get("/api/student/my-interview", response_model=MyInterviewResponse)
@@ -3337,163 +3818,264 @@ async def get_my_interview(http_request: Request, current_student: dict = Depend
         student_email = current_student['email']
         enrolled_user = user_service.get_user_by_email(student_email)
         
-        if not enrolled_user:
-            # No enrolled user found, return empty response
-            logger.warning(f"[API] No enrolled_user found for email {student_email}")
-            return MyInterviewResponse(
-                enrolled=[],
-                scheduled=None,
-                completed=[]
-            )
-        
-        user_id = enrolled_user['id']
-        
-        # Get explicit assignments
-        assigned_assignments = assignment_service.get_user_assignments(user_id, status='assigned')
-        assigned_slot_ids = {a['slot_id'] for a in assigned_assignments}
-        
-        # Get selected slot and booking (scheduled)
-        selected_assignments = assignment_service.get_user_assignments(user_id, status='selected')
-        
-        # Get completed interviews
-        completed_bookings = []
+        # Get current time
         now = get_now_ist()
-        all_bookings = booking_service.supabase.table('interview_bookings')\
+        logger.info(f"[API] Current IST time: {now.isoformat()}")
+        
+        # ALWAYS check bookings by email first (most reliable method)
+        # This ensures we find bookings regardless of user_id status
+        logger.info(f"[API] Checking bookings by email: {student_email}")
+        
+        # Try exact match first
+        email_bookings_result = booking_service.supabase.table('interview_bookings')\
             .select('*, interview_slots(*)')\
-            .eq('user_id', user_id)\
+            .eq('email', student_email)\
             .execute()
+        
+        email_bookings = email_bookings_result.data or []
+        logger.info(f"[API] Found {len(email_bookings)} bookings by exact email match: {student_email}")
+        
+        # If no exact match, try case-insensitive (fetch all and filter)
+        if len(email_bookings) == 0:
+            logger.info(f"[API] No exact email match, trying case-insensitive search...")
+            all_email_bookings = booking_service.supabase.table('interview_bookings')\
+                .select('*, interview_slots(*)')\
+                .execute()
+            
+            if all_email_bookings.data:
+                # Filter by case-insensitive email match
+                email_bookings = [
+                    b for b in all_email_bookings.data 
+                    if b.get('email', '').lower() == student_email.lower()
+                ]
+                logger.info(f"[API] Found {len(email_bookings)} bookings by case-insensitive email match")
+        
+        # Log details of found bookings for debugging
+        if email_bookings:
+            for booking in email_bookings:
+                logger.info(f"[API] Booking found: token={booking.get('token')}, email={booking.get('email')}, user_id={booking.get('user_id')}, scheduled_at={booking.get('scheduled_at')}")
+        
+        # Also check by user_id if enrolled_user exists
+        all_bookings_data = []
+        user_id = None
+        
+        if enrolled_user:
+            user_id = enrolled_user['id']
+            logger.info(f"[API] Also checking bookings by user_id: {user_id}")
+            user_id_bookings_result = booking_service.supabase.table('interview_bookings')\
+                .select('*, interview_slots(*)')\
+                .eq('user_id', user_id)\
+                .execute()
+            
+            user_id_bookings = user_id_bookings_result.data or []
+            logger.info(f"[API] Found {len(user_id_bookings)} bookings by user_id: {user_id}")
+            
+            # Combine both results (remove duplicates by token)
+            seen_tokens = set()
+            for booking in email_bookings + user_id_bookings:
+                token = booking.get('token')
+                if token and token not in seen_tokens:
+                    all_bookings_data.append(booking)
+                    seen_tokens.add(token)
+            
+            # Update any bookings found by email that don't have user_id
+            for booking in email_bookings:
+                if not booking.get('user_id') and booking.get('token'):
+                    try:
+                        booking_service.supabase.table('interview_bookings')\
+                            .update({'user_id': user_id})\
+                            .eq('token', booking['token'])\
+                            .execute()
+                        logger.info(f"[API] ✅ Updated booking {booking['token']} with user_id: {user_id}")
+                    except Exception as e:
+                        logger.warning(f"[API] Failed to update booking {booking.get('token')}: {e}")
+        else:
+            # No enrolled_user, use email bookings only
+            logger.warning(f"[API] No enrolled_user found for email {student_email}, using email-based bookings only")
+            all_bookings_data = email_bookings
+        
+        # Create a mock result object for compatibility
+        class MockResult:
+            def __init__(self, data):
+                self.data = data
+        
+        all_bookings = MockResult(all_bookings_data)
+        logger.info(f"[API] Total unique bookings found: {len(all_bookings_data)}")
+        
+        # Get all completed interviews by checking:
+        # 1. Evaluations table (has evaluation = interview was completed)
+        # 2. Transcripts table (has transcript = interview was conducted)
+        # 3. Booking status = 'completed'
+        completed_tokens = set()
+        if all_bookings.data:
+            booking_tokens = [b.get('token') for b in all_bookings.data if b.get('token')]
+            if booking_tokens:
+                try:
+                    # Check evaluations table
+                    evaluations_result = booking_service.supabase.table('interview_evaluations')\
+                        .select('booking_token')\
+                        .in_('booking_token', booking_tokens)\
+                        .execute()
+                    evaluation_tokens = {eval_data['booking_token'] for eval_data in (evaluations_result.data or [])}
+                    logger.info(f"[API] Found {len(evaluation_tokens)} interviews with evaluations")
+                    
+                    # Check transcripts table (if there's a transcript, interview was conducted)
+                    transcripts_result = booking_service.supabase.table('interview_transcripts')\
+                        .select('booking_token')\
+                        .in_('booking_token', booking_tokens)\
+                        .execute()
+                    transcript_tokens = {transcript_data['booking_token'] for transcript_data in (transcripts_result.data or [])}
+                    logger.info(f"[API] Found {len(transcript_tokens)} interviews with transcripts")
+                    
+                    # Check booking status = 'completed'
+                    completed_status_tokens = {b.get('token') for b in all_bookings.data if b.get('status') == 'completed'}
+                    logger.info(f"[API] Found {len(completed_status_tokens)} bookings with status='completed'")
+                    
+                    # Union all: if any evidence exists, mark as completed
+                    completed_tokens = evaluation_tokens | transcript_tokens | completed_status_tokens
+                    logger.info(f"[API] Total unique completed interviews: {len(completed_tokens)} (evaluations: {len(evaluation_tokens)}, transcripts: {len(transcript_tokens)}, status: {len(completed_status_tokens)})")
+                except Exception as e:
+                    logger.warning(f"[API] Failed to fetch completion evidence: {e}")
+                    completed_tokens = set()
+        
+        # Separate upcoming, missed, and completed interviews
+        upcoming_bookings = []
+        missed_bookings = []
+        completed_bookings = []
         
         if all_bookings.data:
             for booking in all_bookings.data:
                 try:
-                    # Parse the stored datetime (already in IST) and ensure it's IST-aware
-                    scheduled_at_str = booking['scheduled_at'].replace('Z', '').replace('+00:00', '')
-                    scheduled_at = to_ist(datetime.fromisoformat(scheduled_at_str))
-                    if scheduled_at < now:
-                        completed_bookings.append(booking)
-                except (ValueError, KeyError):
+                    # Parse the stored datetime - handle UTC or IST format properly
+                    scheduled_at_str = booking['scheduled_at']
+                    scheduled_at = parse_datetime_safe(scheduled_at_str)
+                    booking_token = booking.get('token')
+                    booking_status = booking.get('status', 'scheduled')
+                    
+                    # Get interview duration from slot if available, otherwise default to 30 minutes
+                    duration_minutes = 30  # Default duration
+                    slot_data = booking.get('interview_slots')
+                    if slot_data:
+                        if slot_data.get('duration_minutes'):
+                            duration_minutes = slot_data['duration_minutes']
+                        elif slot_data.get('end_time') and slot_data.get('slot_datetime'):
+                            # Calculate duration from slot start and end times
+                            try:
+                                slot_start_str = slot_data.get('slot_datetime', '')
+                                slot_end_str = slot_data.get('end_time', '')
+                                if slot_start_str and slot_end_str:
+                                    slot_start = parse_datetime_safe(slot_start_str)
+                                    slot_end = parse_datetime_safe(slot_end_str)
+                                    duration_minutes = int((slot_end - slot_start).total_seconds() / 60)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"[API] Failed to calculate duration from slot times: {e}")
+                                pass  # Use default duration if calculation fails
+                    
+                    # Calculate interview end time
+                    interview_end_time = scheduled_at + timedelta(minutes=duration_minutes)
+                    
+                    # Debug logging for timezone issues
+                    logger.info(f"[API] Booking {booking_token}: scheduled_at_str={scheduled_at_str}, parsed_ist={scheduled_at.isoformat()}, end_time={interview_end_time.isoformat()}, now_ist={now.isoformat()}, duration={duration_minutes}min")
+                    
+                    # Check if interview window has passed (end time, not start time)
+                    time_diff = (interview_end_time - now).total_seconds() / 60  # minutes
+                    logger.info(f"[API] Booking {booking_token}: Time difference = {time_diff:.1f} minutes (negative = past, positive = future)")
+                    
+                    if interview_end_time < now:
+                        # Interview window has passed - check if it was completed
+                        logger.info(f"[API] Booking {booking_token}: Interview window has passed (end_time < now)")
+                        logger.info(f"[API] Booking {booking_token}: booking_status={booking_status}, in_completed_tokens={booking_token in completed_tokens}")
+                        
+                        # Mark as completed if:
+                        # 1. Booking status is 'completed', OR
+                        # 2. There's an evaluation record (interview was actually conducted), OR
+                        # 3. There's a transcript (interview was conducted)
+                        is_completed = (
+                            booking_status == 'completed' or 
+                            booking_token in completed_tokens or
+                            booking.get('status') == 'completed'
+                        )
+                        
+                        if is_completed:
+                            logger.info(f"[API] Booking {booking_token}: Marking as COMPLETED")
+                            completed_bookings.append(booking)
+                        else:
+                            # Interview window passed but not completed = missed
+                            logger.info(f"[API] Booking {booking_token}: Marking as MISSED (no completion evidence)")
+                            missed_bookings.append(booking)
+                    else:
+                        # Interview window hasn't passed yet = upcoming
+                        logger.info(f"[API] Booking {booking_token}: Marking as UPCOMING (end_time >= now)")
+                        upcoming_bookings.append(booking)
+                except (ValueError, KeyError, TypeError) as e:
+                    # If we can't parse the date, log the error with full details and skip it
+                    booking_token = booking.get('token', 'unknown')
+                    scheduled_at_str = booking.get('scheduled_at', 'N/A')
+                    logger.error(f"[API] Failed to parse booking date for token {booking_token}: {e}")
+                    logger.error(f"[API] Raw scheduled_at value: {scheduled_at_str} (type: {type(scheduled_at_str)})")
+                    logger.error(f"[API] Full booking data: {booking}")
+                    # Skip this booking - don't include it in any category
                     pass
         
-        enrolled = []
-        # Add explicitly assigned slots
-        for assignment in assigned_assignments:
-            slot_data = assignment.get('interview_slots')
-            if slot_data:
-                if isinstance(slot_data, dict):
-                    slot = SlotResponse(**slot_data)
-                elif isinstance(slot_data, list) and len(slot_data) > 0:
-                    slot = SlotResponse(**slot_data[0])
-                else:
-                    continue
-                
-                enrolled.append(AssignmentResponse(
-                    id=assignment['id'],
-                    user_id=assignment['user_id'],
-                    slot_id=assignment['slot_id'],
-                    status=assignment['status'],
-                    assigned_at=assignment['assigned_at'],
-                    selected_at=assignment.get('selected_at'),
-                    slot=slot
-                ))
-        
-        # If user has no scheduled or completed interviews, add ALL other available slots
-        if not selected_assignments and not completed_bookings:
-            available_slots = slot_service.get_available_slots()
-            for slot_data in available_slots:
-                if slot_data['id'] not in assigned_slot_ids:
-                    enrolled.append(AssignmentResponse(
-                        id=f"slot_{slot_data['id']}",
-                        user_id=user_id,
-                        slot_id=slot_data['id'],
-                        status='assigned',
-                        assigned_at=get_now_ist().isoformat(),
-                        slot=SlotResponse(**slot_data)
-                    ))
-        
-        # Sort enrolled by slot datetime
-        enrolled.sort(key=lambda x: x.slot.slot_datetime)
-        
-        # Get selected slot and booking
-        scheduled = None
-        if selected_assignments:
-            assignment = selected_assignments[0]  # User should only have one selected
-            slot_data = assignment.get('interview_slots')
-            if slot_data:
-                if isinstance(slot_data, dict):
-                    slot = slot_data
-                elif isinstance(slot_data, list) and len(slot_data) > 0:
-                    slot = slot_data[0]
-                else:
-                    slot = None
-                
-                if slot:
-                    # Get booking for this slot
-                    bookings_result = booking_service.supabase.table('interview_bookings')\
-                        .select('*')\
-                        .eq('user_id', user_id)\
-                        .eq('slot_id', slot['id'])\
-                        .maybe_single()\
-                        .execute()
-                    
-                    booking = bookings_result.data if bookings_result else None
-                    
-                    if booking:
-                        base_url = get_frontend_url(http_request)
-                        interview_url = f"{base_url}/interview/{booking['token']}" if base_url else f"/interview/{booking['token']}"
-                        
-                        scheduled = {
-                            'assignment': {
-                                'id': assignment['id'],
-                                'slot_id': assignment['slot_id'],
-                                'selected_at': assignment.get('selected_at'),
-                            },
-                            'slot': slot,
-                            'booking': {
-                                'token': booking['token'],
-                                'scheduled_at': booking['scheduled_at'],
-                                'interview_url': interview_url,
-                            }
-                        }
-        
-        # If no slot-based booking found, check for direct bookings (bulk scheduled)
-        if not scheduled:
-            direct_bookings = booking_service.supabase.table('interview_bookings')\
-                .select('*')\
-                .eq('user_id', user_id)\
-                .is_('slot_id', 'null')\
-                .gte('scheduled_at', now.isoformat())\
-                .order('scheduled_at')\
-                .execute()
+        # Build upcoming interviews list
+        upcoming = []
+        for booking in sorted(upcoming_bookings, key=lambda x: x.get('scheduled_at', '')):
+            slot_data = booking.get('interview_slots')
+            base_url = get_frontend_url(http_request)
+            interview_url = f"{base_url}/interview/{booking['token']}" if base_url else f"/interview/{booking['token']}"
             
-            if direct_bookings.data and len(direct_bookings.data) > 0:
-                booking = direct_bookings.data[0]  # Get the earliest upcoming direct booking
-                base_url = get_frontend_url(http_request)
-                interview_url = f"{base_url}/interview/{booking['token']}" if base_url else f"/interview/{booking['token']}"
-                
-                scheduled = {
-                    'assignment': None,  # No assignment for direct bookings
-                    'slot': None,  # No slot for direct bookings
-                    'booking': {
-                        'token': booking['token'],
-                        'scheduled_at': booking['scheduled_at'],
-                        'interview_url': interview_url,
-                        'name': booking.get('name'),
-                        'email': booking.get('email'),
-                    }
-                }
+            upcoming.append({
+                'booking': {
+                    'token': booking['token'],
+                    'scheduled_at': booking['scheduled_at'],
+                    'interview_url': interview_url,
+                    'name': booking.get('name'),
+                    'email': booking.get('email'),
+                },
+                'slot': slot_data if slot_data else None,
+            })
         
-        # Get completed interviews
+        # Build missed interviews list
+        missed = []
+        for booking in sorted(missed_bookings, key=lambda x: x.get('scheduled_at', ''), reverse=True):
+            slot_data = booking.get('interview_slots')
+            base_url = get_frontend_url(http_request)
+            interview_url = f"{base_url}/interview/{booking['token']}" if base_url else f"/interview/{booking['token']}"
+            
+            missed.append({
+                'booking': {
+                    'token': booking['token'],
+                    'scheduled_at': booking['scheduled_at'],
+                    'interview_url': interview_url,
+                    'name': booking.get('name'),
+                    'email': booking.get('email'),
+                    'status': booking.get('status', 'scheduled'),
+                },
+                'slot': slot_data if slot_data else None,
+            })
+        
+        # Build completed interviews list
         completed = []
         for booking in sorted(completed_bookings, key=lambda x: x.get('scheduled_at', ''), reverse=True):
             slot_data = booking.get('interview_slots')
+            base_url = get_frontend_url(http_request)
+            evaluation_url = f"{base_url}/evaluation/{booking['token']}" if base_url else f"/evaluation/{booking['token']}"
+            
             completed.append({
-                'booking': booking,
+                'booking': {
+                    'token': booking['token'],
+                    'scheduled_at': booking['scheduled_at'],
+                    'evaluation_url': evaluation_url,
+                    'name': booking.get('name'),
+                    'email': booking.get('email'),
+                    'status': booking.get('status', 'completed'),
+                },
                 'slot': slot_data if slot_data else None,
             })
         
         return MyInterviewResponse(
-            enrolled=enrolled,
-            scheduled=scheduled,
+            upcoming=upcoming,
+            missed=missed,
             completed=completed
         )
         
