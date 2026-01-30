@@ -49,6 +49,10 @@ class EvaluationService:
         strengths: Optional[List[str]] = None,
         areas_for_improvement: Optional[List[str]] = None,
         interview_state: Optional[Dict[str, Any]] = None,
+        communication_quality: Optional[float] = None,
+        technical_knowledge: Optional[float] = None,
+        problem_solving: Optional[float] = None,
+        overall_feedback: Optional[str] = None,
     ) -> Optional[str]:
         """
         Create or update an evaluation record.
@@ -68,6 +72,10 @@ class EvaluationService:
                 "strengths": strengths or [],
                 "areas_for_improvement": areas_for_improvement or [],
                 "interview_state": interview_state,
+                "communication_quality": float(communication_quality) if communication_quality is not None else None,
+                "technical_knowledge": float(technical_knowledge) if technical_knowledge is not None else None,
+                "problem_solving": float(problem_solving) if problem_solving is not None else None,
+                "overall_feedback": overall_feedback,
                 "evaluated_at": get_now_ist().isoformat(),
             }
             
@@ -401,12 +409,19 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                     logger.warning(f"AI analysis failed: {e}, using fallback", exc_info=True)
             
             # Extract data from AI analysis or use fallback
+            communication_quality = None
+            technical_knowledge = None
+            problem_solving = None
+            overall_feedback = None
             if ai_analysis:
                 overall_score = ai_analysis.get('overall_score', 7.0)
                 strengths = ai_analysis.get('strengths', [])
                 areas_for_improvement = ai_analysis.get('areas_for_improvement', [])
                 rounds_analysis = ai_analysis.get('rounds_analysis', [])
-                
+                communication_quality = ai_analysis.get('communication_quality')
+                technical_knowledge = ai_analysis.get('technical_knowledge')
+                problem_solving = ai_analysis.get('problem_solving')
+                overall_feedback = ai_analysis.get('overall_feedback')
                 logger.info(f"✅ Using AI-generated evaluation (score: {overall_score})")
             else:
                 # Fallback to basic evaluation
@@ -446,7 +461,7 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                     "topics_covered": round_analysis.get("topics_covered", []),
                 })
             
-            # Create evaluation
+            # Create evaluation (create_evaluation already inserts round docs from rounds_data)
             evaluation_id = self.create_evaluation(
                 booking_token=booking_token,
                 room_name=room_name,
@@ -458,21 +473,12 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                 strengths=strengths,
                 areas_for_improvement=areas_for_improvement,
                 interview_state=interview_state,
+                communication_quality=communication_quality,
+                technical_knowledge=technical_knowledge,
+                problem_solving=problem_solving,
+                overall_feedback=overall_feedback,
             )
-            
-            # Save detailed round evaluations if AI analysis provided them
-            if evaluation_id and ai_analysis and rounds_analysis:
-                for idx, round_analysis in enumerate(rounds_analysis, 1):
-                    self.save_round_evaluation(
-                        evaluation_id=evaluation_id,
-                        round_number=idx,
-                        round_name=round_analysis.get("round_name", f"Round {idx}"),
-                        questions_asked=round_analysis.get("questions_count", 0),
-                        average_rating=round_analysis.get("average_rating"),
-                        topics_covered=round_analysis.get("topics_covered", []),
-                        performance_summary=round_analysis.get("performance_summary"),
-                    )
-            
+            # Do not call save_round_evaluation here — create_evaluation already writes rounds from rounds_data.
             return evaluation_id
             
         except Exception as e:

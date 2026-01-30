@@ -51,19 +51,32 @@ app = FastAPI(
 )
 
 # CORS middleware: with allow_credentials=True, origins cannot be "*" (must be explicit).
-# Include localhost (dev) and allow cloudflared tunnel origins so frontend works from tunnel too.
+# Include localhost (dev), common LAN origin, and cloudflared tunnel URLs.
 _cors_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
+    "http://192.168.1.13:3000",  # LAN access (e.g. from same network)
 ]
 if config.server.frontend_url:
     _cors_origins.append(config.server.frontend_url.rstrip("/"))
+# Extra origins from env (comma-separated), e.g. CORS_ORIGINS=http://192.168.1.5:3000,http://10.0.0.1:3000
+_extra_origins = os.getenv("CORS_ORIGINS", "")
+if _extra_origins:
+    for o in _extra_origins.split(","):
+        o = o.strip().rstrip("/")
+        if o and o not in _cors_origins:
+            _cors_origins.append(o)
+# Allow cloudflare tunnels and any LAN IP (192.168.x.x, 10.x.x.x) with any port
+_origin_regex = (
+    r"https?://[a-z0-9-]+\.trycloudflare\.com|"
+    r"https?://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$"
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_origin_regex=r"https?://[a-z0-9-]+\.trycloudflare\.com",  # cloudflared tunnel URLs
+    allow_origin_regex=_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -206,6 +219,11 @@ class EvaluationResponse(BaseModel):
     strengths: List[str] = []
     areas_for_improvement: List[str] = []
     transcript: List[Dict[str, Any]] = []
+    # Gemini analysis criteria (0-10 each) and overall feedback paragraph
+    communication_quality: Optional[float] = None
+    technical_knowledge: Optional[float] = None
+    problem_solving: Optional[float] = None
+    overall_feedback: Optional[str] = None
 
 
 class ConnectionDetailsRequest(BaseModel):
@@ -939,6 +957,10 @@ async def get_evaluation(token: str):
             strengths=evaluation.get("strengths", []) if evaluation else [],
             areas_for_improvement=evaluation.get("areas_for_improvement", []) if evaluation else [],
             transcript=transcript,
+            communication_quality=evaluation.get("communication_quality") if evaluation else None,
+            technical_knowledge=evaluation.get("technical_knowledge") if evaluation else None,
+            problem_solving=evaluation.get("problem_solving") if evaluation else None,
+            overall_feedback=evaluation.get("overall_feedback") if evaluation else None,
         )
         
     except HTTPException:
@@ -1142,15 +1164,20 @@ async def connection_details(
                     detail=f"Failed to validate interview: {str(e)}"
                 )
         
-        # Generate room details
+        # Generate room details - use interview_<token> so the worker can save transcripts to MongoDB
         participant_name = "user"
         participant_identity = f"voice_assistant_user_{random.randint(1, 99999)}"
-        room_name = f"voice_assistant_room_{random.randint(1, 99999)}"
+        booking_token = getattr(request, "token", None) or ""
+        room_name = f"interview_{booking_token}" if booking_token else f"voice_assistant_room_{random.randint(1, 99999)}"
         
-        # Create room metadata with application text (if available)
-        room_metadata = None
+        # Create room metadata (application_text + booking_token for worker transcript storage)
+        room_metadata_dict = {}
         if application_text:
-            room_metadata = json.dumps({"application_text": application_text})
+            room_metadata_dict["application_text"] = application_text
+        if booking_token:
+            room_metadata_dict["booking_token"] = booking_token
+            room_metadata_dict["token"] = booking_token
+        room_metadata = json.dumps(room_metadata_dict) if room_metadata_dict else None
         
         # Create LiveKit AccessToken
         token = livekit_api.AccessToken(
