@@ -8,6 +8,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from bson import ObjectId
 from pydantic import BaseModel, EmailStr
 from urllib.parse import urlparse
 import asyncio
@@ -21,6 +23,7 @@ from urllib.parse import urlparse
 from livekit import api as livekit_api
 
 from app.config import Config, get_config
+from app.db.mongo import get_database
 from app.services.resume_service import ResumeService
 from app.services.booking_service import BookingService
 from app.services.email_service import EmailService
@@ -80,6 +83,13 @@ assignment_service = AssignmentService(config)
 application_form_service = ApplicationFormService(config)
 transcript_storage_service = TranscriptStorageService(config)
 evaluation_service = EvaluationService(config)
+
+
+@app.on_event("startup")
+async def startup_log_db():
+    """Log MongoDB database name so you can verify it matches seed_admin (same .env)."""
+    db = get_database(config)
+    logger.info(f"[API] MongoDB database in use: {db.name}")
 
 
 # Helper function to get frontend URL from request dynamically
@@ -428,7 +438,7 @@ async def login(request: LoginRequest):
         logger.warning(f"[API] Login failed: {request.username}")
         return LoginResponse(
             success=False,
-            error="Invalid credentials"
+            error="Invalid credentials. Admin: username 'admin', password from seed_admin (default Admin@123). Use same database as seed_admin (see backend startup log for DB name)."
         )
         
     except Exception as e:
@@ -465,40 +475,20 @@ async def reset_password(request: ResetPasswordRequest):
     In production, this would require a verification token or OTP.
     """
     try:
-        # Check if student exists
-        student = auth_service.supabase.table('students')\
-            .select('id')\
-            .eq('email', request.email)\
-            .maybe_single()\
-            .execute()
-        
-        if not student or not student.data:
+        student = auth_service.get_student_by_email(request.email)
+        if not student:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User with this email not found"
             )
-            
-        # Hash new password
-        new_password_hash = auth_service.hash_password(request.new_password)
-        
-        # Update password and clear must_change_password flag
-        result = auth_service.supabase.table('students')\
-            .update({
-                'password_hash': new_password_hash,
-                'must_change_password': False,
-                'updated_at': get_now_ist().isoformat()
-            })\
-            .eq('email', request.email)\
-            .execute()
-            
-        if result and result.data:
-            logger.info(f"[API] ✅ Password reset successfully for {request.email}")
-            return {"success": True, "message": "Password reset successfully"}
-        else:
+        ok = auth_service.reset_student_password(request.email, request.new_password)
+        if not ok:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to reset password"
             )
+        logger.info(f"[API] ✅ Password reset successfully for {request.email}")
+        return {"success": True, "message": "Password reset successfully"}
     except HTTPException:
         raise
     except Exception as e:
@@ -592,7 +582,7 @@ async def upload_application(file: UploadFile = File(...)):
     """
     Upload and process application file.
     
-    Extracts text from PDF or DOC/DOCX files and uploads to Supabase Storage.
+    Extracts text from PDF or DOC/DOCX files and uploads to MongoDB GridFS.
     """
     try:
         # Handle case where file might be None or empty
@@ -624,7 +614,7 @@ async def upload_application(file: UploadFile = File(...)):
                 detail=error_msg
             )
         
-        # Upload to Supabase Storage
+        # Upload to MongoDB GridFS
         try:
             application_url = booking_service.upload_application_to_storage(file_content, file.filename)
         except Exception as e:
@@ -843,43 +833,31 @@ async def get_booking(
         )
 
 
-@app.get("/api/orchestrator/session/{session_id}/full")
-async def get_orchestrator_session_full(session_id: str):
-    """
-    Proxy to remote orchestrator GET /session/{session_id}/full.
-    Used by frontend to fetch full session (messages, permanent_context, evaluation) when
-    orchestrator has ORCH_API_KEY set. Backend sends Bearer token so frontend does not need the key.
-    """
-    base_url = (config.orchestrator_llm.base_url or "").rstrip("/")
-    if not base_url:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Orchestrator not configured (ORCHESTRATOR_BASE_URL missing)",
-        )
-    api_key = config.orchestrator_llm.api_key
-    import httpx
+@app.get("/api/files/{file_id}")
+async def serve_file(file_id: str):
+    """Serve uploaded application file from MongoDB GridFS."""
     try:
-        url = f"{base_url}/session/{session_id}/full"
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=e.response.text or "Orchestrator error",
+        from gridfs import GridFS
+        db = get_database(config)
+        fs = GridFS(db)
+        oid = ObjectId(file_id)
+        grid_out = fs.get(oid)
+
+        def stream():
+            while True:
+                chunk = grid_out.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+
+        return StreamingResponse(
+            stream(),
+            media_type=getattr(grid_out, "content_type", None) or "application/octet-stream",
+            headers={"Content-Disposition": f"inline; filename={getattr(grid_out, 'filename', 'file')}"},
         )
     except Exception as e:
-        logger.error(f"[API] Orchestrator proxy error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to fetch from orchestrator: {str(e)}",
-        )
+        logger.warning(f"[API] File not found or error: {file_id} {e}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
 
 @app.get("/api/evaluation/{token}", response_model=EvaluationResponse)
@@ -1358,7 +1336,7 @@ async def admin_login(request: AdminLoginRequest):
     """
     Admin authentication endpoint.
     
-    Authenticates admin users from Supabase database.
+    Authenticates admin users from MongoDB.
     """
     try:
         admin_user = admin_service.authenticate(request.username, request.password)
@@ -1795,7 +1773,7 @@ class UserResponse(BaseModel):
     status: str
     notes: Optional[str] = None
     created_at: str
-    updated_at: str
+    updated_at: Optional[str] = None  # Optional for MongoDB docs that may not have it
     email_sent: Optional[bool] = None  # True if email was sent successfully
     email_error: Optional[str] = None  # Error message if email failed
     temporary_password: Optional[str] = None  # Temporary password (for testing - remove in production)
@@ -1988,8 +1966,9 @@ async def enroll_user(
         print(f"[API] ✅ User enrolled: {request.email}")
         logger.info(f"[API] ✅ User enrolled: {request.email}")
         
-        # Add email status to response
+        # Add email status to response (ensure optional fields for UserResponse)
         user_dict = dict(user)
+        user_dict.setdefault('updated_at', None)
         user_dict['email_sent'] = email_sent
         user_dict['email_error'] = email_error
         user_dict['temporary_password'] = temporary_password  # Include for testing (remove in production)
@@ -2606,7 +2585,7 @@ class SlotResponse(BaseModel):
     status: str
     notes: Optional[str] = None
     created_at: str
-    updated_at: str
+    updated_at: Optional[str] = None  # Optional for MongoDB docs that may not have it
     created_by: Optional[str] = None
 
 
@@ -2660,6 +2639,15 @@ async def create_slot(
         duration_minutes = request.duration_minutes or 45
         end_time = start_time + timedelta(minutes=duration_minutes)
         
+        # Avoid duplicate: a slot already exists at this datetime
+        slot_datetime_iso = start_time.isoformat()
+        existing = slot_service.get_slot_by_datetime(slot_datetime_iso)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A slot already exists at this date and time. Edit the existing slot or choose a different time."
+            )
+        
         logger.info(f"[API] Creating slot with duration: {duration_minutes} minutes (from request: {request.duration_minutes})")
         
         slot = slot_service.create_slot(
@@ -2672,7 +2660,9 @@ async def create_slot(
         
         logger.info(f"[API] Slot created: id={slot.get('id')}, duration_minutes={slot.get('duration_minutes')}, stored_duration={slot.get('duration_minutes')}")
         
-        return SlotResponse(**slot)
+        slot_dict = dict(slot)
+        slot_dict.setdefault('updated_at', None)
+        return SlotResponse(**slot_dict)
         
     except HTTPException:
         raise
@@ -2696,7 +2686,16 @@ async def get_all_slots(
     """
     try:
         slots = slot_service.get_all_slots(status=slot_status, include_past=include_past)
-        return [SlotResponse(**slot) for slot in slots]
+        out = []
+        for slot in slots:
+            d = dict(slot)
+            d.setdefault("updated_at", None)
+            # Ensure datetime fields are strings for SlotResponse (MongoDB may return datetime)
+            for key in ("slot_datetime", "start_time", "end_time", "created_at", "updated_at"):
+                if key in d and d[key] is not None and hasattr(d[key], "isoformat"):
+                    d[key] = d[key].isoformat()
+            out.append(SlotResponse(**d))
+        return out
     except Exception as e:
         error_msg = f"Failed to fetch slots: {str(e)}"
         logger.error(f"[API] {error_msg}", exc_info=True)
@@ -3528,7 +3527,7 @@ async def get_my_assignments(current_student: dict = Depends(get_current_student
         for assignment in assignments:
             slot_data = assignment.get('interview_slots')
             if slot_data:
-                # Handle nested slot data from Supabase join
+                # Handle nested slot data
                 if isinstance(slot_data, dict):
                     slot = SlotResponse(**slot_data)
                 elif isinstance(slot_data, list) and len(slot_data) > 0:
@@ -3581,14 +3580,8 @@ async def select_slot(
         
         # Check if application form is completed
         try:
-            application_form_result = booking_service.supabase.table('student_application_forms')\
-                .select('id, status')\
-                .eq('user_id', user_id)\
-                .eq('status', 'submitted')\
-                .maybe_single()\
-                .execute()
-            
-            if not application_form_result or not application_form_result.data:
+            application_form = application_form_service.get_form_by_user_id(user_id)
+            if not application_form or application_form.get('status') != 'submitted':
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Please complete and submit your application form before selecting a slot. Go to 'My Profile' or 'Apply for Job' section to fill/upload your application form."
@@ -3695,20 +3688,7 @@ async def select_slot(
         
         # Create booking
         try:
-            # Get application form if exists
-            application_form = None
-            try:
-                application_form_result = booking_service.supabase.table('student_application_forms')\
-                    .select('id, application_text')\
-                    .eq('user_id', user_id)\
-                    .eq('status', 'submitted')\
-                    .maybe_single()\
-                    .execute()
-                if application_form_result and application_form_result.data:
-                    application_form = application_form_result.data
-            except Exception as e:
-                logger.warning(f"[API] Failed to fetch application form: {str(e)}")
-            
+            application_form = application_form_service.get_form_by_user_id(user_id)
             token = booking_service.create_booking(
                 name=user['name'],
                 email=user['email'],
@@ -3719,7 +3699,7 @@ async def select_slot(
                 slot_id=slot['id'],
                 user_id=user_id,
                 assignment_id=assignment['id'],
-                application_form_id=application_form['id'] if application_form else None,
+                application_form_id=application_form.get('id') if application_form else None,
             )
         except Exception as e:
             logger.error(f"[API] Failed to create booking: {str(e)}")
@@ -3822,121 +3802,49 @@ async def get_my_interview(http_request: Request, current_student: dict = Depend
         now = get_now_ist()
         logger.info(f"[API] Current IST time: {now.isoformat()}")
         
-        # ALWAYS check bookings by email first (most reliable method)
-        # This ensures we find bookings regardless of user_id status
         logger.info(f"[API] Checking bookings by email: {student_email}")
-        
-        # Try exact match first
-        email_bookings_result = booking_service.supabase.table('interview_bookings')\
-            .select('*, interview_slots(*)')\
-            .eq('email', student_email)\
-            .execute()
-        
-        email_bookings = email_bookings_result.data or []
-        logger.info(f"[API] Found {len(email_bookings)} bookings by exact email match: {student_email}")
-        
-        # If no exact match, try case-insensitive (fetch all and filter)
-        if len(email_bookings) == 0:
-            logger.info(f"[API] No exact email match, trying case-insensitive search...")
-            all_email_bookings = booking_service.supabase.table('interview_bookings')\
-                .select('*, interview_slots(*)')\
-                .execute()
-            
-            if all_email_bookings.data:
-                # Filter by case-insensitive email match
-                email_bookings = [
-                    b for b in all_email_bookings.data 
-                    if b.get('email', '').lower() == student_email.lower()
-                ]
-                logger.info(f"[API] Found {len(email_bookings)} bookings by case-insensitive email match")
-        
-        # Log details of found bookings for debugging
-        if email_bookings:
-            for booking in email_bookings:
-                logger.info(f"[API] Booking found: token={booking.get('token')}, email={booking.get('email')}, user_id={booking.get('user_id')}, scheduled_at={booking.get('scheduled_at')}")
-        
-        # Also check by user_id if enrolled_user exists
+        email_bookings = booking_service.get_bookings_by_email(student_email)
+        logger.info(f"[API] Found {len(email_bookings)} bookings by email: {student_email}")
+        user_id = enrolled_user['id'] if enrolled_user else None
+        user_id_bookings = booking_service.get_bookings_by_user_id(user_id) if user_id else []
+        logger.info(f"[API] Found {len(user_id_bookings)} bookings by user_id: {user_id or 'N/A'}")
+        seen_tokens = set()
         all_bookings_data = []
-        user_id = None
-        
-        if enrolled_user:
-            user_id = enrolled_user['id']
-            logger.info(f"[API] Also checking bookings by user_id: {user_id}")
-            user_id_bookings_result = booking_service.supabase.table('interview_bookings')\
-                .select('*, interview_slots(*)')\
-                .eq('user_id', user_id)\
-                .execute()
-            
-            user_id_bookings = user_id_bookings_result.data or []
-            logger.info(f"[API] Found {len(user_id_bookings)} bookings by user_id: {user_id}")
-            
-            # Combine both results (remove duplicates by token)
-            seen_tokens = set()
-            for booking in email_bookings + user_id_bookings:
-                token = booking.get('token')
-                if token and token not in seen_tokens:
-                    all_bookings_data.append(booking)
-                    seen_tokens.add(token)
-            
-            # Update any bookings found by email that don't have user_id
-            for booking in email_bookings:
-                if not booking.get('user_id') and booking.get('token'):
-                    try:
-                        booking_service.supabase.table('interview_bookings')\
-                            .update({'user_id': user_id})\
-                            .eq('token', booking['token'])\
-                            .execute()
-                        logger.info(f"[API] ✅ Updated booking {booking['token']} with user_id: {user_id}")
-                    except Exception as e:
-                        logger.warning(f"[API] Failed to update booking {booking.get('token')}: {e}")
-        else:
-            # No enrolled_user, use email bookings only
-            logger.warning(f"[API] No enrolled_user found for email {student_email}, using email-based bookings only")
-            all_bookings_data = email_bookings
-        
-        # Create a mock result object for compatibility
+        for booking in email_bookings + user_id_bookings:
+            token = booking.get('token')
+            if token and token not in seen_tokens:
+                seen_tokens.add(token)
+                slot = slot_service.get_slot(booking['slot_id']) if booking.get('slot_id') else None
+                booking['slot'] = slot
+                booking['interview_slots'] = slot
+                all_bookings_data.append(booking)
+        for booking in email_bookings:
+            if not booking.get('user_id') and user_id and booking.get('token'):
+                try:
+                    booking_service.update_booking(booking['token'], user_id=user_id)
+                    booking['user_id'] = user_id
+                    logger.info(f"[API] ✅ Updated booking {booking['token']} with user_id: {user_id}")
+                except Exception as e:
+                    logger.warning(f"[API] Failed to update booking {booking.get('token')}: {e}")
+        if not enrolled_user:
+            logger.warning(f"[API] No enrolled_user for email {student_email}, using email-based bookings only")
         class MockResult:
             def __init__(self, data):
                 self.data = data
-        
         all_bookings = MockResult(all_bookings_data)
         logger.info(f"[API] Total unique bookings found: {len(all_bookings_data)}")
-        
-        # Get all completed interviews by checking:
-        # 1. Evaluations table (has evaluation = interview was completed)
-        # 2. Transcripts table (has transcript = interview was conducted)
-        # 3. Booking status = 'completed'
         completed_tokens = set()
         if all_bookings.data:
             booking_tokens = [b.get('token') for b in all_bookings.data if b.get('token')]
             if booking_tokens:
                 try:
-                    # Check evaluations table
-                    evaluations_result = booking_service.supabase.table('interview_evaluations')\
-                        .select('booking_token')\
-                        .in_('booking_token', booking_tokens)\
-                        .execute()
-                    evaluation_tokens = {eval_data['booking_token'] for eval_data in (evaluations_result.data or [])}
-                    logger.info(f"[API] Found {len(evaluation_tokens)} interviews with evaluations")
-                    
-                    # Check transcripts table (if there's a transcript, interview was conducted)
-                    transcripts_result = booking_service.supabase.table('interview_transcripts')\
-                        .select('booking_token')\
-                        .in_('booking_token', booking_tokens)\
-                        .execute()
-                    transcript_tokens = {transcript_data['booking_token'] for transcript_data in (transcripts_result.data or [])}
-                    logger.info(f"[API] Found {len(transcript_tokens)} interviews with transcripts")
-                    
-                    # Check booking status = 'completed'
+                    evaluation_tokens = evaluation_service.get_booking_tokens_with_evaluations(booking_tokens)
+                    transcript_tokens = transcript_storage_service.get_booking_tokens_with_transcripts(booking_tokens)
                     completed_status_tokens = {b.get('token') for b in all_bookings.data if b.get('status') == 'completed'}
-                    logger.info(f"[API] Found {len(completed_status_tokens)} bookings with status='completed'")
-                    
-                    # Union all: if any evidence exists, mark as completed
                     completed_tokens = evaluation_tokens | transcript_tokens | completed_status_tokens
-                    logger.info(f"[API] Total unique completed interviews: {len(completed_tokens)} (evaluations: {len(evaluation_tokens)}, transcripts: {len(transcript_tokens)}, status: {len(completed_status_tokens)})")
+                    logger.info(f"[API] Completed: {len(completed_tokens)} (evals: {len(evaluation_tokens)}, transcripts: {len(transcript_tokens)}, status: {len(completed_status_tokens)})")
                 except Exception as e:
                     logger.warning(f"[API] Failed to fetch completion evidence: {e}")
-                    completed_tokens = set()
         
         # Separate upcoming, missed, and completed interviews
         upcoming_bookings = []

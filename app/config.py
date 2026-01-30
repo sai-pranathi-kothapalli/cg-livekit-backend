@@ -56,49 +56,10 @@ class OpenAIConfig:
 
 
 @dataclass
-class DeepgramConfig:
-    """Deepgram STT configuration"""
-    api_key: Optional[str] = None
-    enabled: bool = False
-
-
-@dataclass
-class ElevenLabsConfig:
-    """ElevenLabs STT fallback configuration"""
-    api_key: Optional[str] = None
-    enabled: bool = False
-
-
-@dataclass
 class GeminiConfig:
-    """Google Gemini LLM configuration (cloud fallback)"""
-    api_key: Optional[str] = None
+    """Google Gemini LLM configuration (primary LLM)"""
+    api_key: str
     model: str = "gemini-1.5-flash"
-    enabled: bool = False
-
-
-@dataclass
-class GrokConfig:
-    """xAI Grok LLM configuration (cloud fallback)"""
-    api_key: Optional[str] = None
-    model: str = "grok-2-1212"
-    enabled: bool = False
-
-
-@dataclass
-class OrchestratorConfig:
-    """Skillifire Orchestrator LLM configuration (primary LLM via orchestrator API)"""
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None  # ORCH_API_KEY: required when orchestrator has ORCH_API_KEY set
-    enabled: bool = False
-
-
-@dataclass
-class ElevenLabsTTSConfig:
-    """ElevenLabs TTS configuration (cloud fallback)"""
-    api_key: Optional[str] = None
-    voice_id: str = "21m00Tcm4TlvDq8ikWAM"
-    enabled: bool = False
 
 
 @dataclass
@@ -110,10 +71,10 @@ class SileroVADConfig:
 
 
 @dataclass
-class SupabaseConfig:
-    """Supabase configuration"""
-    url: str
-    service_role_key: str
+class MongoConfig:
+    """MongoDB configuration"""
+    uri: str
+    db_name: Optional[str] = None  # Database name; if unset, uses 'interview'
 
 
 @dataclass
@@ -143,20 +104,15 @@ class Config:
     # LiveKit configuration
     livekit: LiveKitConfig
     
-    # AI Services - Self-hosted (Primary)
+    # AI Services - Self-hosted (STT, TTS, and LLM fallback Qwen)
     openai: OpenAIConfig
     silero_vad: SileroVADConfig
     
-    # AI Services - Cloud (Fallback)
-    deepgram_stt: DeepgramConfig         # STT cloud service
-    elevenlabs_stt: ElevenLabsConfig     # STT fallback (secondary)
-    elevenlabs_tts: ElevenLabsTTSConfig  # TTS fallback
-    gemini_llm: GeminiConfig             # LLM fallback (legacy)
-    grok_llm: GrokConfig                  # LLM fallback (Grok/xAI)
-    orchestrator_llm: OrchestratorConfig  # LLM via orchestrator (primary, replaces direct LLM calls)
+    # AI Services - LLM primary (Google Gemini)
+    gemini_llm: GeminiConfig
     
-    # Supabase configuration
-    supabase: SupabaseConfig
+    # MongoDB configuration
+    mongo: MongoConfig
     
     # SMTP configuration
     smtp: SMTPConfig
@@ -234,13 +190,15 @@ class Config:
         if not stt_base_url:
             raise ValueError("STT_BASE_URL environment variable is required")
         
-        # Validate Supabase variables
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        if not supabase_url:
-            raise ValueError("SUPABASE_URL environment variable is required")
-        if not supabase_key:
-            raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable is required")
+        # Validate Gemini (primary LLM)
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is required (primary LLM)")
+        
+        # Validate MongoDB URI
+        mongodb_uri = os.getenv("MONGODB_URI")
+        if not mongodb_uri:
+            raise ValueError("MONGODB_URI environment variable is required")
         
         # SMTP configuration (optional)
         smtp_port = os.getenv("SMTP_PORT", "587")
@@ -272,37 +230,13 @@ class Config:
                 min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "0.8")),
                 activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.6")),
             ),
-            deepgram_stt=DeepgramConfig(
-                api_key=os.getenv("DEEPGRAM_API_KEY"),
-                enabled=os.getenv("DEEPGRAM_STT_ENABLED", "false").lower() == "true",
-            ),
-            elevenlabs_stt=ElevenLabsConfig(
-                api_key=os.getenv("ELEVENLABS_STT_API_KEY"),
-                enabled=os.getenv("ELEVENLABS_STT_ENABLED", "false").lower() == "true",
-            ),
             gemini_llm=GeminiConfig(
-                api_key=os.getenv("GEMINI_API_KEY"),
+                api_key=gemini_api_key,
                 model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-                enabled=os.getenv("GEMINI_LLM_ENABLED", "false").lower() == "true",
             ),
-            grok_llm=GrokConfig(
-                api_key=os.getenv("XAI_API_KEY"),
-                model=os.getenv("GROK_MODEL", "grok-2-1212"),
-                enabled=os.getenv("GROK_LLM_ENABLED", "false").lower() == "true",
-            ),
-            orchestrator_llm=OrchestratorConfig(
-                base_url=os.getenv("ORCHESTRATOR_BASE_URL"),
-                api_key=os.getenv("ORCH_API_KEY") or None,
-                enabled=os.getenv("ORCHESTRATOR_LLM_ENABLED", "false").lower() == "true",
-            ),
-            elevenlabs_tts=ElevenLabsTTSConfig(
-                api_key=os.getenv("ELEVENLABS_TTS_API_KEY"),
-                voice_id=os.getenv("ELEVENLABS_TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
-                enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
-            ),
-            supabase=SupabaseConfig(
-                url=supabase_url,
-                service_role_key=supabase_key,
+            mongo=MongoConfig(
+                uri=mongodb_uri,
+                db_name=os.getenv("MONGODB_DB_NAME") or None,
             ),
             smtp=SMTPConfig(
                 host=os.getenv("SMTP_HOST"),

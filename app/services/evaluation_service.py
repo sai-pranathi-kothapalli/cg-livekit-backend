@@ -2,7 +2,7 @@
 Evaluation Service
 
 Calculates and stores interview evaluation metrics and scores.
-Uses AI (Grok) to analyze transcripts and generate detailed feedback.
+Uses AI (Google Gemini) to analyze transcripts and generate detailed feedback.
 """
 
 import json
@@ -10,14 +10,14 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from decimal import Decimal
-from supabase import Client
 from app.config import Config
+from app.db.mongo import get_database, doc_with_id
 from app.utils.logger import get_logger
 from app.utils.datetime_utils import get_now_ist
 
 logger = get_logger(__name__)
 
-# Try to import httpx for Grok API calls
+# Try to import httpx for Gemini API calls
 try:
     import httpx
     HTTPX_AVAILABLE = True
@@ -33,11 +33,9 @@ class EvaluationService:
     
     def __init__(self, config: Config):
         self.config = config
-        from supabase import create_client
-        self.supabase: Client = create_client(
-            config.supabase.url,
-            config.supabase.service_role_key
-        )
+        self.db = get_database(config)
+        self.evals = self.db["interview_evaluations"]
+        self.rounds = self.db["interview_round_evaluations"]
     
     def create_evaluation(
         self,
@@ -73,35 +71,44 @@ class EvaluationService:
                 "evaluated_at": get_now_ist().isoformat(),
             }
             
-            # Check if evaluation already exists
-            existing = self.supabase.table('interview_evaluations')\
-                .select("id")\
-                .eq("booking_token", booking_token)\
-                .execute()
-            
-            if existing.data and len(existing.data) > 0:
-                # Update existing evaluation
-                result = self.supabase.table('interview_evaluations')\
-                    .update(evaluation_data)\
-                    .eq("booking_token", booking_token)\
-                    .execute()
-                
-                if result.data:
-                    logger.info(f"✅ Updated evaluation for booking {booking_token}")
-                    return existing.data[0]['id']
-            else:
-                # Create new evaluation
-                result = self.supabase.table('interview_evaluations')\
-                    .insert(evaluation_data)\
-                    .execute()
-                
-                if result.data:
-                    evaluation_id = result.data[0]['id']
-                    logger.info(f"✅ Created evaluation {evaluation_id} for booking {booking_token}")
-                    return evaluation_id
-            
-            return None
-            
+            existing = self.evals.find_one({"booking_token": booking_token})
+            if existing:
+                evaluation_id = str(existing["_id"])
+                self.evals.update_one(
+                    {"booking_token": booking_token},
+                    {"$set": evaluation_data},
+                )
+                self.rounds.delete_many({"evaluation_id": evaluation_id})
+                if rounds_data:
+                    for i, rd in enumerate(rounds_data):
+                        self.rounds.insert_one({
+                            "evaluation_id": evaluation_id,
+                            "round_number": rd.get("round_number", i + 1),
+                            "round_name": rd.get("round_name", ""),
+                            "questions_asked": rd.get("questions_count", 0),
+                            "average_rating": rd.get("average_rating"),
+                            "performance_summary": rd.get("performance_summary"),
+                            "topics_covered": rd.get("topics_covered", []),
+                            "response_ratings": rd.get("response_ratings", []),
+                        })
+                logger.info(f"✅ Updated evaluation for booking {booking_token}")
+                return evaluation_id
+            r = self.evals.insert_one(evaluation_data)
+            evaluation_id = str(r.inserted_id)
+            if rounds_data:
+                for i, rd in enumerate(rounds_data):
+                    self.rounds.insert_one({
+                        "evaluation_id": evaluation_id,
+                        "round_number": rd.get("round_number", i + 1),
+                        "round_name": rd.get("round_name", ""),
+                        "questions_asked": rd.get("questions_count", 0),
+                        "average_rating": rd.get("average_rating"),
+                        "performance_summary": rd.get("performance_summary"),
+                        "topics_covered": rd.get("topics_covered", []),
+                        "response_ratings": rd.get("response_ratings", []),
+                    })
+            logger.info(f"✅ Created evaluation {evaluation_id} for booking {booking_token}")
+            return evaluation_id
         except Exception as e:
             logger.error(f"❌ Error creating evaluation: {e}", exc_info=True)
             return None
@@ -139,14 +146,9 @@ class EvaluationService:
                 "response_ratings": response_ratings or [],
             }
             
-            result = self.supabase.table('interview_round_evaluations')\
-                .insert(round_data)\
-                .execute()
-            
-            if result.data:
-                logger.debug(f"✅ Saved round {round_number} evaluation")
-                return True
-            return False
+            self.rounds.insert_one(round_data)
+            logger.debug(f"✅ Saved round {round_number} evaluation")
+            return True
             
         except Exception as e:
             logger.error(f"❌ Error saving round evaluation: {e}", exc_info=True)
@@ -160,40 +162,34 @@ class EvaluationService:
             Evaluation data dictionary or None
         """
         try:
-            # Get main evaluation
-            result = self.supabase.table('interview_evaluations')\
-                .select("*")\
-                .eq("booking_token", booking_token)\
-                .execute()
-            
-            if not result.data or len(result.data) == 0:
+            doc = self.evals.find_one({"booking_token": booking_token})
+            if not doc:
                 return None
-            
-            evaluation = result.data[0]
-            evaluation_id = evaluation['id']
-            
-            # Get round evaluations
-            rounds_result = self.supabase.table('interview_round_evaluations')\
-                .select("*")\
-                .eq("evaluation_id", evaluation_id)\
-                .order("round_number", desc=False)\
-                .execute()
-            
-            evaluation['rounds'] = rounds_result.data if rounds_result.data else []
-            
+            evaluation = doc_with_id(doc)
+            evaluation_id = evaluation.get("id")
+            rounds_cursor = self.rounds.find({"evaluation_id": evaluation_id}).sort("round_number", 1)
+            evaluation["rounds"] = [doc_with_id(r) for r in rounds_cursor]
             return evaluation
-            
         except Exception as e:
             logger.error(f"❌ Error fetching evaluation: {e}", exc_info=True)
             return None
-    
-    async def _analyze_with_grok(
+
+    def get_booking_tokens_with_evaluations(self, tokens: List[str]) -> set:
+        """Return set of booking_tokens that have an evaluation."""
+        try:
+            cursor = self.evals.find({"booking_token": {"$in": tokens}}, {"booking_token": 1})
+            return {doc["booking_token"] for doc in cursor}
+        except Exception as e:
+            logger.error(f"Error fetching evaluation tokens: {e}")
+            return set()
+
+    async def _analyze_with_gemini(
         self,
         transcript: List[Dict[str, Any]],
         interview_state: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Use Grok AI to analyze interview transcript and generate evaluation.
+        Use Google Gemini to analyze interview transcript and generate evaluation.
         
         Returns:
             Dictionary with evaluation data or None if analysis fails
@@ -202,64 +198,55 @@ class EvaluationService:
             logger.warning("httpx not available, skipping AI analysis")
             return None
         
-        if not self.config.grok_llm.enabled or not self.config.grok_llm.api_key:
-            logger.debug("Grok LLM not enabled, using fallback evaluation")
+        if not self.config.gemini_llm.api_key:
+            logger.debug("Gemini API key not set, using fallback evaluation")
             return None
         
         try:
-            # Format transcript for analysis
             transcript_text = self._format_transcript_for_analysis(transcript)
-            
-            # Create analysis prompt
             prompt = self._create_evaluation_prompt(transcript_text, interview_state)
-            
-            # Call Grok API
+            full_prompt = (
+                "You are an expert interview evaluator. Analyze interview transcripts and provide "
+                "detailed, constructive feedback. Always respond with valid JSON only.\n\n" + prompt
+            )
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
+            )
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
-                    "https://api.x.ai/v1/chat/completions",
+                    url,
                     headers={
-                        "Authorization": f"Bearer {self.config.grok_llm.api_key}",
+                        "x-goog-api-key": self.config.gemini_llm.api_key,
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": self.config.grok_llm.model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "You are an expert interview evaluator. Analyze interview transcripts and provide detailed, constructive feedback. Always respond with valid JSON."
-                            },
-                            {
-                                "role": "user",
-                                "content": prompt
-                            }
-                        ],
-                        "temperature": 0.3,  # Lower temperature for more consistent evaluation
-                    }
+                        "contents": [{"parts": [{"text": full_prompt}]}],
+                        "generationConfig": {"temperature": 0.3},
+                    },
                 )
                 response.raise_for_status()
                 data = response.json()
-                
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"]["content"]
-                    # Parse JSON response
-                    try:
-                        # Extract JSON from markdown code blocks if present
-                        if "```json" in content:
-                            content = content.split("```json")[1].split("```")[0].strip()
-                        elif "```" in content:
-                            content = content.split("```")[1].split("```")[0].strip()
-                        
-                        analysis = json.loads(content)
-                        logger.info("✅ AI evaluation analysis completed")
-                        return analysis
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to parse Grok response as JSON: {e}")
-                        logger.debug(f"Response content: {content[:500]}")
-                        return None
-                else:
-                    logger.warning("No choices in Grok API response")
-                    return None
-                    
+            
+            content = None
+            if "candidates" in data and len(data["candidates"]) > 0:
+                cand = data["candidates"][0]
+                if "content" in cand and "parts" in cand["content"] and cand["content"]["parts"]:
+                    content = cand["content"]["parts"][0].get("text", "")
+            if not content:
+                logger.warning("No content in Gemini API response")
+                return None
+            try:
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+                analysis = json.loads(content)
+                logger.info("✅ AI evaluation analysis completed (Gemini)")
+                return analysis
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse Gemini response as JSON: {e}")
+                logger.debug(f"Response content: {content[:500]}")
+                return None
         except Exception as e:
             logger.warning(f"⚠️  AI evaluation analysis failed: {e}, using fallback")
             return None
@@ -393,7 +380,7 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                                 asyncio.set_event_loop(new_loop)
                                 try:
                                     return new_loop.run_until_complete(
-                                        self._analyze_with_grok(transcript, interview_state)
+                                        self._analyze_with_gemini(transcript, interview_state)
                                     )
                                 finally:
                                     new_loop.close()
@@ -403,12 +390,12 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                                 ai_analysis = future.result(timeout=90)
                         else:
                             ai_analysis = loop.run_until_complete(
-                                self._analyze_with_grok(transcript, interview_state)
+                                self._analyze_with_gemini(transcript, interview_state)
                             )
                     except RuntimeError:
                         # No event loop, create one
                         ai_analysis = asyncio.run(
-                            self._analyze_with_grok(transcript, interview_state)
+                            self._analyze_with_gemini(transcript, interview_state)
                         )
                 except Exception as e:
                     logger.warning(f"AI analysis failed: {e}, using fallback", exc_info=True)

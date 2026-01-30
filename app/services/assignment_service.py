@@ -1,15 +1,14 @@
 """
 Assignment Service
 
-Handles user-slot assignment operations with Supabase.
+Handles user-slot assignment operations with MongoDB.
 """
 
 from typing import Optional, Dict, Any, List
-from datetime import datetime
-from supabase import create_client, Client
+
 from app.config import Config
+from app.db.mongo import get_database, doc_with_id, to_object_id
 from app.utils.logger import get_logger
-pub_schema = "public"
 from app.utils.exceptions import AgentError
 from app.utils.datetime_utils import get_now_ist
 
@@ -17,80 +16,67 @@ logger = get_logger(__name__)
 
 
 class AssignmentService:
-    """Service for managing user-slot assignments using Supabase"""
-    
+    """Service for managing user-slot assignments using MongoDB"""
+
     def __init__(self, config: Config):
         self.config = config
-        self.supabase: Client = create_client(
-            config.supabase.url,
-            config.supabase.service_role_key
-        )
-    
-    def assign_slots_to_user(
-        self,
-        user_id: str,
-        slot_ids: List[str]
-    ) -> List[Dict[str, Any]]:
-        """
-        Assign multiple slots to a user in Supabase.
-        """
+        self.db = get_database(config)
+        self.col = self.db["user_slot_assignments"]
+
+    def assign_slots_to_user(self, user_id: str, slot_ids: List[str]) -> List[Dict[str, Any]]:
         try:
-            created_assignments = []
+            created = []
             for slot_id in slot_ids:
                 assignment_data = {
                     "user_id": user_id,
                     "slot_id": slot_id,
                     "status": "assigned",
-                    "assigned_at": get_now_ist().isoformat()
+                    "assigned_at": get_now_ist().isoformat(),
                 }
-                result = self.supabase.table('user_slot_assignments').insert(assignment_data).execute()
-                if result.data:
-                    created_assignments.append(result.data[0])
-            return created_assignments
+                r = self.col.insert_one(assignment_data)
+                doc = self.col.find_one({"_id": r.inserted_id})
+                created.append(doc_with_id(doc))
+            return created
         except Exception as e:
             logger.error(f"Error assigning slots: {e}")
             raise AgentError(f"Failed to assign slots: {str(e)}", "AssignmentService")
 
     def get_user_assignments(self, user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Fetch assignments for a user with optional status filter.
-        """
         try:
-            query = self.supabase.table('user_slot_assignments').select("*").eq("user_id", user_id)
+            q = {"user_id": user_id}
             if status:
-                query = query.eq("status", status)
-            
-            result = query.execute()
-            return result.data if result.data else []
+                q["status"] = status
+            return [doc_with_id(d) for d in self.col.find(q)]
         except Exception as e:
             logger.error(f"Error fetching user assignments: {e}")
             return []
 
     def select_slot_for_user(self, user_id: str, assignment_id: str) -> bool:
-        """
-        Mark a specific assignment as 'selected'.
-        """
         try:
-            result = self.supabase.table('user_slot_assignments').update({
-                "status": "selected",
-                "selected_at": get_now_ist().isoformat()
-            }).eq("id", assignment_id).eq("user_id", user_id).execute()
-            
-            return len(result.data) > 0
+            oid = to_object_id(assignment_id)
+            q = {"user_id": user_id}
+            if oid:
+                q["_id"] = oid
+            else:
+                q["id"] = assignment_id
+            r = self.col.update_one(
+                q,
+                {"$set": {"status": "selected", "selected_at": get_now_ist().isoformat()}},
+            )
+            return r.matched_count > 0
         except Exception as e:
-            logger.error(f"Error selecting slot for user: {e}")
+            logger.error(f"Error selecting slot: {e}")
             return False
 
     def cancel_other_assignments(self, user_id: str, selected_assignment_id: str) -> bool:
-        """
-        Cancel all other 'assigned' slots for a user once they select one.
-        """
         try:
-            # Update status to 'cancelled' for all other assignments
-            result = self.supabase.table('user_slot_assignments').update({
-                "status": "cancelled"
-            }).eq("user_id", user_id).neq("id", selected_assignment_id).eq("status", "assigned").execute()
-            
+            oid = to_object_id(selected_assignment_id)
+            q = {"user_id": user_id, "status": "assigned"}
+            if oid:
+                q["_id"] = {"$ne": oid}
+            else:
+                q["id"] = {"$ne": selected_assignment_id}
+            self.col.update_many(q, {"$set": {"status": "cancelled"}})
             return True
         except Exception as e:
             logger.error(f"Error cancelling other assignments: {e}")
