@@ -57,8 +57,9 @@ def create_indexes():
         try:
             db.enrolled_users.drop_index("email_1")
             print("  ⚠️  Dropped existing non-unique 'email' index")
-        except:
-            pass
+        except Exception as e:
+            # Index may not exist or have a different name; continue to create unique index
+            print(f"  ℹ️  Could not drop existing email index: {e}")
         db.enrolled_users.create_index("email", unique=True)
         print("  ✅ Created unique index on 'email'")
     except Exception as e:
