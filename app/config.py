@@ -13,18 +13,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-# Load environment variables from .env in backend directory
-_env_path = Path(__file__).parent.parent / ".env"
+# Load environment variables from .env in backend directory (resolve to absolute path)
+_backend_root = Path(__file__).resolve().parent.parent
+_env_path = _backend_root / ".env"
 if _env_path.exists():
     load_dotenv(dotenv_path=str(_env_path))
 else:
     # Fallback to .env.local in parent directory (for backward compatibility)
-    _env_path_fallback = Path(__file__).parent.parent.parent / ".env.local"
+    _env_path_fallback = _backend_root.parent / ".env.local"
     if _env_path_fallback.exists():
         load_dotenv(dotenv_path=str(_env_path_fallback))
-    else:
-        # Last fallback to current directory
-        load_dotenv()
+    # Also load from current working directory so "python backend_server.py" from backend root picks up .env
+    load_dotenv()
 
 # Note: Google API key setup removed - using self-hosted OpenAI-compatible models only
 
