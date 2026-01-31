@@ -82,20 +82,28 @@ class BookingService:
             logger.error(f"Error fetching booking: {e}")
             return None
 
+    def _doc_to_booking(self, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Convert MongoDB document to booking dict with proper timezone handling."""
+        if not doc:
+            return None
+        booking = doc_with_id(doc)
+        if booking and booking.get("scheduled_at"):
+            try:
+                scheduled_at_ist = parse_datetime_safe(booking["scheduled_at"])
+                booking["scheduled_at"] = scheduled_at_ist.isoformat()
+            except (ValueError, TypeError):
+                pass
+        return booking
+
     def get_all_bookings(self) -> List[Dict[str, Any]]:
         """Fetch all bookings from MongoDB."""
         try:
             cursor = self.col.find({})
             out = []
             for doc in cursor:
-                booking = doc_with_id(doc)
-                if booking and booking.get("scheduled_at"):
-                    try:
-                        scheduled_at_ist = parse_datetime_safe(booking["scheduled_at"])
-                        booking["scheduled_at"] = scheduled_at_ist.isoformat()
-                    except (ValueError, TypeError):
-                        pass
-                out.append(booking)
+                booking = self._doc_to_booking(doc)
+                if booking:
+                    out.append(booking)
             return out
         except Exception as e:
             logger.error(f"Error fetching all bookings: {e}")

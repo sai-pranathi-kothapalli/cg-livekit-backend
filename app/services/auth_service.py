@@ -20,7 +20,6 @@ from app.utils.datetime_utils import get_now_ist
 
 logger = get_logger(__name__)
 
-JWT_SECRET_KEY = "your-secret-key-change-in-production"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
@@ -33,10 +32,15 @@ class AuthService:
         self.db = get_database(config)
         self.students = self.db["students"]
         self.admin_users = self.db["admin_users"]
-        self.jwt_secret = os.getenv("JWT_SECRET_KEY", JWT_SECRET_KEY)
+        self.jwt_secret = os.getenv("JWT_SECRET_KEY")
+        if not self.jwt_secret or not self.jwt_secret.strip():
+            raise ValueError(
+                "JWT_SECRET_KEY must be set in environment. "
+                "Generate a secret (e.g. openssl rand -hex 32) and set it in .env"
+            )
 
     def hash_password(self, password: str) -> str:
-        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
     def verify_password(self, password: str, password_hash: str) -> bool:
         try:

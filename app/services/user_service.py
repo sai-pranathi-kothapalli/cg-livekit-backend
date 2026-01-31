@@ -67,12 +67,30 @@ class UserService:
             logger.error(f"Error fetching user by ID: {e}")
             return None
 
-    def get_all_users(self) -> List[Dict[str, Any]]:
+    def get_all_users(
+        self,
+        limit: Optional[int] = None,
+        skip: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get enrolled users with optional pagination. Max limit 500."""
         try:
-            return [doc_with_id(d) for d in self.col.find({})]
+            cursor = self.col.find({}).sort("created_at", -1)
+            if skip is not None and skip > 0:
+                cursor = cursor.skip(skip)
+            if limit is not None:
+                cursor = cursor.limit(min(limit, 500))
+            return [doc_with_id(d) for d in cursor]
         except Exception as e:
             logger.error(f"Error fetching all users: {e}")
             return []
+
+    def count_users(self) -> int:
+        """Total count of enrolled users (for pagination)."""
+        try:
+            return self.col.count_documents({})
+        except Exception as e:
+            logger.error(f"Error counting users: {e}")
+            return 0
 
     def update_user(self, user_id: str, **kwargs) -> Dict[str, Any]:
         try:

@@ -367,8 +367,8 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                     first_time = datetime.fromisoformat(transcript[0].get('timestamp', '').replace('Z', '+00:00'))
                     last_time = datetime.fromisoformat(transcript[-1].get('timestamp', '').replace('Z', '+00:00'))
                     duration_minutes = int((last_time - first_time).total_seconds() / 60)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[EvaluationService] Could not compute duration from transcript timestamps: {e}")
             
             # Try AI-powered analysis
             ai_analysis = None

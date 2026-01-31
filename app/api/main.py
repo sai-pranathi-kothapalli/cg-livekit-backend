@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from bson import ObjectId
 from pydantic import BaseModel, EmailStr
 from urllib.parse import urlparse
@@ -21,6 +21,9 @@ import os
 from urllib.parse import urlparse
 
 from livekit import api as livekit_api
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import Config, get_config
 from app.db.mongo import get_database
@@ -43,12 +46,17 @@ from app.utils.datetime_utils import IST, get_now_ist, to_ist, parse_datetime_sa
 logger = get_logger(__name__)
 config = get_config()
 
+# Rate limiter for auth endpoints (limit by IP)
+limiter = Limiter(key_func=get_remote_address)
+
 # Create FastAPI app
 app = FastAPI(
     title="Interview Scheduling API",
     description="API for application upload and interview scheduling",
     version="1.0.0",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS middleware: with allow_credentials=True, origins cannot be "*" (must be explicit).
 # Include localhost (dev), common LAN origin, and cloudflared tunnel URLs.
@@ -100,9 +108,50 @@ evaluation_service = EvaluationService(config)
 
 @app.on_event("startup")
 async def startup_log_db():
-    """Log MongoDB database name so you can verify it matches seed_admin (same .env)."""
+    """Log MongoDB database name and ensure indexes exist for common queries."""
     db = get_database(config)
     logger.info(f"[API] MongoDB database in use: {db.name}")
+    # Ensure indexes for common query patterns
+    try:
+        db["students"].create_index("email", unique=True)
+        db["admin_users"].create_index("username", unique=True)
+        db["enrolled_users"].create_index("email")
+        db["bookings"].create_index("token", unique=True)
+        db["bookings"].create_index([("user_id", 1), ("scheduled_at", 1)])
+        db["bookings"].create_index("scheduled_at")
+        db["slots"].create_index("slot_datetime")
+        logger.info("[API] MongoDB indexes ensured")
+    except Exception as e:
+        logger.warning(f"[API] Index creation skipped or partial: {e}")
+
+
+@app.get("/health")
+async def health():
+    """Liveness probe: returns 200 if the process is running."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe: returns 200 if the app can serve traffic (e.g. DB reachable)."""
+    try:
+        db = get_database(config)
+        db.client.admin.command("ping")
+        return {"status": "ready"}
+    except Exception as e:
+        logger.warning(f"[API] Readiness check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    """Prometheus metrics for monitoring (RED, etc.)."""
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except Exception as e:
+        logger.warning(f"[API] Metrics export failed: {e}")
+        raise HTTPException(status_code=503, detail="Metrics not available")
 
 
 # Helper function to get frontend URL from request dynamically
@@ -196,6 +245,17 @@ class BookingResponse(BaseModel):
     created_at: str
     application_text: Optional[str] = None
     application_url: Optional[str] = None
+
+
+class PaginatedCandidatesResponse(BaseModel):
+    """Paginated response for candidates list"""
+    items: List[BookingResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
 
 
 class RoundEvaluationResponse(BaseModel):
@@ -397,24 +457,24 @@ async def get_interview_access_config():
 
 
 @app.post("/api/login", response_model=LoginResponse)
-async def login(request: LoginRequest):
+@limiter.limit("15/minute")
+async def login(request: Request, body: LoginRequest):
     """
     Unified login endpoint - automatically detects admin or student.
-    
-    Tries admin authentication first, then student authentication.
+    Rate limited to 15 requests per minute per IP.
     """
     try:
-        logger.info(f"[API] Login attempt: {request.username}")
-        
+        logger.info(f"[API] Login attempt: {body.username}")
+
         # Try admin authentication first
-        admin_user = auth_service.authenticate_admin(request.username, request.password)
+        admin_user = auth_service.authenticate_admin(body.username, body.password)
         if admin_user:
             token = auth_service.generate_token(
                 user_id=admin_user['id'],
                 role='admin',
                 username=admin_user['username']
             )
-            logger.info(f"[API] ✅ Admin login successful: {request.username}")
+            logger.info(f"[API] ✅ Admin login successful: {body.username}")
             return LoginResponse(
                 success=True,
                 token=token,
@@ -427,16 +487,16 @@ async def login(request: LoginRequest):
                 },
                 must_change_password=False
             )
-        
+
         # Try student authentication (email-based)
-        student_user = auth_service.authenticate_student(request.username, request.password)
+        student_user = auth_service.authenticate_student(body.username, body.password)
         if student_user:
             token = auth_service.generate_token(
                 user_id=student_user['id'],
                 role='student',
                 email=student_user['email']
             )
-            logger.info(f"[API] ✅ Student login successful: {request.username}")
+            logger.info(f"[API] ✅ Student login successful: {body.username}")
             must_change_password = student_user.get('must_change_password', False)
             return LoginResponse(
                 success=True,
@@ -451,14 +511,14 @@ async def login(request: LoginRequest):
                 },
                 must_change_password=must_change_password
             )
-        
+
         # Authentication failed
-        logger.warning(f"[API] Login failed: {request.username}")
+        logger.warning(f"[API] Login failed: {body.username}")
         return LoginResponse(
             success=False,
-            error="Invalid credentials. Admin: username 'admin', password from seed_admin (default Admin@123). Use same database as seed_admin (see backend startup log for DB name)."
+            error="Invalid credentials"
         )
-        
+
     except Exception as e:
         logger.error(f"[API] Login error: {str(e)}", exc_info=True)
         return LoginResponse(
@@ -532,11 +592,11 @@ async def student_register(request: StudentRegisterRequest):
     try:
         logger.info(f"[API] Student registration attempt: {request.email}")
         
-        # Validate password strength (basic check)
-        if len(request.password) < 6:
+        # Validate password strength
+        if len(request.password) < 12:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 6 characters long"
+                detail="Password must be at least 12 characters long"
             )
         
         # Register student
@@ -1005,9 +1065,9 @@ async def connection_details(
             )
         
         # Extract agent name from request
-        print(f"[API] 📥 Received connection-details request:")
-        print(f"[API]   room_config: {request.room_config}")
-        print(f"[API]   token: {request.token if request.token else 'None'}")
+        logger.debug(f"[API] 📥 Received connection-details request:")
+        logger.debug(f"[API]   room_config: {request.room_config}")
+        logger.debug(f"[API]   token: {request.token if request.token else 'None'}")
         logger.info(f"[API] 📥 Received connection-details request:")
         logger.info(f"   room_config: {request.room_config}")
         logger.info(f"   token: {request.token if request.token else 'None'}")
@@ -1018,19 +1078,19 @@ async def connection_details(
             logger.info(f"   Found agents array: {agents}")
             if agents and len(agents) > 0:
                 first_agent_dict = agents[0]
-                print(f"[API] 🔍 First agent dict from request: {first_agent_dict}")
-                print(f"[API]   Keys in agent dict: {list(first_agent_dict.keys())}")
+                logger.debug(f"[API] 🔍 First agent dict from request: {first_agent_dict}")
+                logger.debug(f"[API]   Keys in agent dict: {list(first_agent_dict.keys())}")
                 logger.info(f"[API] 🔍 First agent dict from request: {first_agent_dict}")
                 logger.info(f"[API]   Keys in agent dict: {list(first_agent_dict.keys())}")
                 
                 # Try both snake_case and camelCase
                 agent_name = first_agent_dict.get("agent_name") or first_agent_dict.get("agentName")
                 if not agent_name:
-                    print(f"[API]   ⚠️  Neither 'agent_name' nor 'agentName' found in dict!")
-                    print(f"[API]   Available keys: {list(first_agent_dict.keys())}")
+                    logger.debug(f"[API]   ⚠️  Neither 'agent_name' nor 'agentName' found in dict!")
+                    logger.debug(f"[API]   Available keys: {list(first_agent_dict.keys())}")
                     logger.warning(f"[API]   ⚠️  Neither 'agent_name' nor 'agentName' found in dict!")
                 else:
-                    print(f"[API]   ✅ Extracted agent_name: '{agent_name}'")
+                    logger.debug(f"[API]   ✅ Extracted agent_name: '{agent_name}'")
                     logger.info(f"[API]   ✅ Extracted agent_name: '{agent_name}'")
         
         # Use default agent name from config if not provided
@@ -1201,27 +1261,27 @@ async def connection_details(
         # [FIX] Force agent name to match what's in worker/agents/
         agent_name = "my-interviewer"
         logger.info(f"   [FIX] Using agent_name: '{agent_name}'")
-        print(f"[API]   [FIX] Using agent_name: '{agent_name}'")
+        logger.debug(f"[API]   [FIX] Using agent_name: '{agent_name}'")
         
         # Set room configuration with agent
         if agent_name:
-            print(f"[API] 🔧 Creating RoomConfiguration with agent dispatch:")
-            print(f"[API] Agent Name: '{agent_name}'")
+            logger.debug(f"[API] 🔧 Creating RoomConfiguration with agent dispatch:")
+            logger.debug(f"[API] Agent Name: '{agent_name}'")
             logger.info(f"[API] 🔧 Creating RoomConfiguration with agent dispatch:")
             logger.info(f"   Agent Name: '{agent_name}'")
             room_config = livekit_api.RoomConfiguration()
             room_agent_dispatch = room_config.agents.add()
             room_agent_dispatch.agent_name = agent_name
-            print(f"[API] RoomConfiguration created with agent: '{room_agent_dispatch.agent_name}'")
+            logger.debug(f"[API] RoomConfiguration created with agent: '{room_agent_dispatch.agent_name}'")
             
             if room_metadata:
                 room_config.metadata = room_metadata
                 logger.info(f"   Room metadata: {room_metadata[:100]}...")
             token.with_room_config(room_config)
-            print(f"[API] ✅ RoomConfiguration attached to token")
+            logger.debug(f"[API] ✅ RoomConfiguration attached to token")
             logger.info(f"[API] ✅ RoomConfiguration set with agent dispatch")
         else:
-            print(f"[API] ⚠️  No agent_name provided - agent will NOT be dispatched!")
+            logger.debug(f"[API] ⚠️  No agent_name provided - agent will NOT be dispatched!")
             logger.warning(f"[API] ⚠️  No agent_name provided - agent will NOT be dispatched!")
         
         # Generate JWT token
@@ -1232,33 +1292,33 @@ async def connection_details(
             import jwt
             decoded = jwt.decode(participant_token, options={"verify_signature": False})
             
-            print(f"\n{'='*60}")
-            print(f"[API] 🔍 TOKEN DEBUG - COMPREHENSIVE INSPECTION")
-            print(f"{'='*60}")
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"[API] 🔍 TOKEN DEBUG - COMPREHENSIVE INSPECTION")
+            logger.debug(f"{'='*60}")
             logger.info(f"[API] 🔍 TOKEN DEBUG - COMPREHENSIVE INSPECTION")
             
             # Show all token keys
-            print(f"[API]   Token keys: {list(decoded.keys())}")
+            logger.debug(f"[API]   Token keys: {list(decoded.keys())}")
             logger.info(f"[API]   Token keys: {list(decoded.keys())}")
             
             # Check for roomConfig
             if "roomConfig" in decoded:
-                print(f"[API]   ✅ roomConfig found in token!")
+                logger.debug(f"[API]   ✅ roomConfig found in token!")
                 logger.info(f"[API]   ✅ roomConfig found in token!")
                 room_config_data = decoded.get('roomConfig', {})
-                print(f"[API]   roomConfig content: {room_config_data}")
+                logger.debug(f"[API]   roomConfig content: {room_config_data}")
                 logger.info(f"[API]   roomConfig content: {room_config_data}")
                 
                 # Verify agent name is in roomConfig
                 if isinstance(room_config_data, dict):
                     agents = room_config_data.get('agents', [])
-                    print(f"[API]   Agents array: {agents}")
+                    logger.debug(f"[API]   Agents array: {agents}")
                     logger.info(f"[API]   Agents array: {agents}")
                     
                     if agents and len(agents) > 0:
                         first_agent_in_token = agents[0]
-                        print(f"[API]   🔍 First agent in token: {first_agent_in_token}")
-                        print(f"[API]   🔍 Agent keys in token: {list(first_agent_in_token.keys()) if isinstance(first_agent_in_token, dict) else 'NOT A DICT'}")
+                        logger.debug(f"[API]   🔍 First agent in token: {first_agent_in_token}")
+                        logger.debug(f"[API]   🔍 Agent keys in token: {list(first_agent_in_token.keys()) if isinstance(first_agent_in_token, dict) else 'NOT A DICT'}")
                         logger.info(f"[API]   🔍 First agent in token: {first_agent_in_token}")
                         
                         # Check both camelCase and snake_case
@@ -1267,58 +1327,58 @@ async def connection_details(
                         
                         agent_name_in_token = agent_name_in_token_camel or agent_name_in_token_snake
                         
-                        print(f"[API]   Agent name (agentName): '{agent_name_in_token_camel}'")
-                        print(f"[API]   Agent name (agent_name): '{agent_name_in_token_snake}'")
-                        print(f"[API]   ✅ Agent name in token (final): '{agent_name_in_token}'")
+                        logger.debug(f"[API]   Agent name (agentName): '{agent_name_in_token_camel}'")
+                        logger.debug(f"[API]   Agent name (agent_name): '{agent_name_in_token_snake}'")
+                        logger.debug(f"[API]   ✅ Agent name in token (final): '{agent_name_in_token}'")
                         logger.info(f"[API]   Agent name (agentName): '{agent_name_in_token_camel}'")
                         logger.info(f"[API]   Agent name (agent_name): '{agent_name_in_token_snake}'")
                         logger.info(f"[API]   ✅ Agent name in token (final): '{agent_name_in_token}'")
                         
                         # Compare with expected
-                        print(f"[API]   Expected agent name: '{agent_name}'")
+                        logger.debug(f"[API]   Expected agent name: '{agent_name}'")
                         logger.info(f"[API]   Expected agent name: '{agent_name}'")
                         
                         if agent_name_in_token == agent_name:
-                            print(f"[API]   ✅✅ MATCH! Agent name matches!")
+                            logger.debug(f"[API]   ✅✅ MATCH! Agent name matches!")
                             logger.info(f"[API]   ✅✅ MATCH! Agent name matches!")
                         else:
-                            print(f"[API]   ❌❌ MISMATCH! Expected: '{agent_name}', Got: '{agent_name_in_token}'")
-                            print(f"[API]   ❌❌ Length comparison - Expected: {len(agent_name)}, Got: {len(agent_name_in_token)}")
-                            print(f"[API]   ❌❌ Character-by-character:")
+                            logger.debug(f"[API]   ❌❌ MISMATCH! Expected: '{agent_name}', Got: '{agent_name_in_token}'")
+                            logger.debug(f"[API]   ❌❌ Length comparison - Expected: {len(agent_name)}, Got: {len(agent_name_in_token)}")
+                            logger.debug(f"[API]   ❌❌ Character-by-character:")
                             for i, (exp_char, got_char) in enumerate(zip(agent_name, agent_name_in_token)):
                                 if exp_char != got_char:
-                                    print(f"[API]     Position {i}: Expected '{exp_char}' (ord={ord(exp_char)}), Got '{got_char}' (ord={ord(got_char)})")
+                                    logger.debug(f"[API]     Position {i}: Expected '{exp_char}' (ord={ord(exp_char)}), Got '{got_char}' (ord={ord(got_char)})")
                             logger.warning(f"[API]   ❌❌ MISMATCH! Expected: '{agent_name}', Got: '{agent_name_in_token}'")
                     else:
-                        print(f"[API]   ❌ No agents in roomConfig!")
+                        logger.debug(f"[API]   ❌ No agents in roomConfig!")
                         logger.warning(f"[API]   ❌ No agents in roomConfig!")
                 else:
-                    print(f"[API]   ⚠️  roomConfig is not a dict: {type(room_config_data)}")
+                    logger.debug(f"[API]   ⚠️  roomConfig is not a dict: {type(room_config_data)}")
                     logger.warning(f"[API]   ⚠️  roomConfig is not a dict: {type(room_config_data)}")
             elif "grants" in decoded:
-                print(f"[API]   ⚠️  roomConfig not found, but grants exist")
-                print(f"[API]   Grants: {decoded.get('grants', {})}")
+                logger.debug(f"[API]   ⚠️  roomConfig not found, but grants exist")
+                logger.debug(f"[API]   Grants: {decoded.get('grants', {})}")
                 logger.info(f"[API]   ⚠️  roomConfig not found, but grants exist")
                 logger.info(f"[API]   Grants: {decoded.get('grants', {})}")
             else:
-                print(f"[API]   ❌❌ CRITICAL: roomConfig NOT in token!")
-                print(f"[API]   Available keys: {list(decoded.keys())}")
+                logger.debug(f"[API]   ❌❌ CRITICAL: roomConfig NOT in token!")
+                logger.debug(f"[API]   Available keys: {list(decoded.keys())}")
                 logger.error(f"[API]   ❌❌ CRITICAL: roomConfig NOT in token!")
                 logger.error(f"[API]   Available keys: {list(decoded.keys())}")
             
-            print(f"{'='*60}\n")
+            logger.debug(f"{'='*60}\n")
             logger.info(f"[API] Token debug complete")
             
         except Exception as e:
-            print(f"\n[API] ❌ Error decoding token: {e}")
+            logger.debug(f"\n[API] ❌ Error decoding token: {e}")
             logger.error(f"[API] ❌ Error decoding token: {e}", exc_info=True)
         
-        print(f"[API] ✅ Generated connection details:")
-        print(f"[API]   Server URL: {config.livekit.url}")
-        print(f"[API]   Room Name: {room_name}")
-        print(f"[API]   Participant Name: {participant_name}")
-        print(f"[API]   Agent Name: {agent_name}")
-        print(f"[API]   Token Length: {len(participant_token)} chars")
+        logger.debug(f"[API] ✅ Generated connection details:")
+        logger.debug(f"[API]   Server URL: {config.livekit.url}")
+        logger.debug(f"[API]   Room Name: {room_name}")
+        logger.debug(f"[API]   Participant Name: {participant_name}")
+        logger.debug(f"[API]   Agent Name: {agent_name}")
+        logger.debug(f"[API]   Token Length: {len(participant_token)} chars")
         logger.info(f"[API] ✅ Generated connection details:")
         logger.info(f"   Server URL: {config.livekit.url}")
         logger.info(f"   Room Name: {room_name}")
@@ -1327,15 +1387,15 @@ async def connection_details(
         logger.info(f"   Token Length: {len(participant_token)} chars")
         
         # Summary before return
-        print(f"\n{'='*60}")
-        print(f"[API] 📊 CONNECTION DETAILS SUMMARY")
-        print(f"{'='*60}")
-        print(f"[API]   Room Name: {room_name}")
-        print(f"[API]   Agent Name (extracted): '{agent_name}'")
-        print(f"[API]   Agent Name (config): '{config.livekit.agent_name}'")
-        print(f"[API]   Agent Name Match: {'✅ YES' if agent_name == config.livekit.agent_name else '❌ NO'}")
-        print(f"[API]   RoomConfig Attached: {'✅ YES' if agent_name else '❌ NO (no agent_name)'}")
-        print(f"{'='*60}\n")
+        logger.debug(f"\n{'='*60}")
+        logger.debug(f"[API] 📊 CONNECTION DETAILS SUMMARY")
+        logger.debug(f"{'='*60}")
+        logger.debug(f"[API]   Room Name: {room_name}")
+        logger.debug(f"[API]   Agent Name (extracted): '{agent_name}'")
+        logger.debug(f"[API]   Agent Name (config): '{config.livekit.agent_name}'")
+        logger.debug(f"[API]   Agent Name Match: {'✅ YES' if agent_name == config.livekit.agent_name else '❌ NO'}")
+        logger.debug(f"[API]   RoomConfig Attached: {'✅ YES' if agent_name else '❌ NO (no agent_name)'}")
+        logger.debug(f"{'='*60}\n")
         logger.info(f"[API] 📊 Connection details summary logged")
         
         return ConnectionDetailsResponse(
@@ -1359,22 +1419,20 @@ async def connection_details(
 # ==================== Admin Endpoints ====================
 
 @app.post("/api/admin/login", response_model=AdminLoginResponse)
-async def admin_login(request: AdminLoginRequest):
+@limiter.limit("15/minute")
+async def admin_login(request: Request, body: AdminLoginRequest):
     """
-    Admin authentication endpoint.
-    
-    Authenticates admin users from MongoDB.
+    Admin authentication endpoint. Rate limited to 15/minute per IP.
     """
     try:
-        admin_user = admin_service.authenticate(request.username, request.password)
-        
+        admin_user = admin_service.authenticate(body.username, body.password)
+
         if admin_user:
-            # Generate authentication token
             token = admin_service.generate_token()
-            logger.info(f"[API] Admin login successful: {request.username}")
+            logger.info(f"[API] Admin login successful: {body.username}")
             return AdminLoginResponse(success=True, token=token)
         else:
-            logger.warning(f"[API] Admin login failed: {request.username}")
+            logger.warning(f"[API] Admin login failed: {body.username}")
             return AdminLoginResponse(success=False, error="Invalid credentials")
     except Exception as e:
         logger.error(f"[API] Admin login error: {str(e)}", exc_info=True)
@@ -1382,9 +1440,10 @@ async def admin_login(request: AdminLoginRequest):
 
 
 @app.get("/api/admin/job-description", response_model=JobDescriptionResponse)
-async def get_job_description():
+async def get_job_description(current_admin: dict = Depends(get_current_admin)):
     """
     Get current job description from database.
+    Requires admin authentication.
     """
     try:
         jd_data = jd_service.get_job_description()
@@ -1398,9 +1457,10 @@ async def get_job_description():
 
 
 @app.put("/api/admin/job-description", response_model=JobDescriptionResponse)
-async def update_job_description(jd: JobDescriptionRequest):
+async def update_job_description(jd: JobDescriptionRequest, current_admin: dict = Depends(get_current_admin)):
     """
     Update job description in database.
+    Requires admin authentication.
     """
     try:
         logger.info(f"[API] Updating job description")
@@ -1424,9 +1484,14 @@ async def update_job_description(jd: JobDescriptionRequest):
 
 
 @app.post("/api/admin/register-candidate", response_model=ScheduleInterviewResponse)
-async def register_candidate(request: CandidateRegistrationRequest, http_request: Request):
+async def register_candidate(
+    request: CandidateRegistrationRequest,
+    http_request: Request,
+    current_admin: dict = Depends(get_current_admin)
+):
     """
     Register a single candidate and schedule interview.
+    Requires admin authentication.
     """
     try:
         logger.info(f"[API] Registering candidate: {request.email}")
@@ -1495,9 +1560,14 @@ async def register_candidate(request: CandidateRegistrationRequest, http_request
 
 
 @app.post("/api/admin/bulk-register", response_model=BulkRegistrationResponse)
-async def bulk_register(file: UploadFile = File(...), http_request: Request = None):
+async def bulk_register(
+    file: UploadFile = File(...),
+    http_request: Request = None,
+    current_admin: dict = Depends(get_current_admin)
+):
     """
     Bulk register candidates from Excel file.
+    Requires admin authentication.
     
     Expected Excel format:
     - Columns: name, email, phone, datetime
@@ -1616,33 +1686,89 @@ async def bulk_register(file: UploadFile = File(...), http_request: Request = No
         )
 
 
-@app.get("/api/admin/candidates", response_model=List[BookingResponse])
-async def get_all_candidates():
+@app.get("/api/admin/candidates", response_model=PaginatedCandidatesResponse)
+async def get_all_candidates(
+    current_admin: dict = Depends(get_current_admin),
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+):
     """
-    Get all registered candidates.
+    Get paginated list of registered candidates.
+    Requires admin authentication.
     
-    TODO: Add pagination, filtering, sorting
+    Args:
+        page: Page number (1-indexed, default 1)
+        page_size: Items per page (default 20, max 100)
+        search: Search by name or email (optional)
+        status_filter: Filter by status (optional)
+        sort_by: Sort field (created_at, scheduled_at, name, email)
+        sort_order: Sort order (asc or desc)
     """
     try:
-        logger.info("[API] Fetching all candidates")
-        bookings = booking_service.get_all_bookings()
+        # Validate pagination params
+        page = max(1, page)
+        page_size = min(max(1, page_size), 100)  # Cap at 100
+        
+        logger.info(f"[API] Fetching candidates: page={page}, size={page_size}, search={search}")
+        
+        # Build query filter
+        query_filter = {}
+        if search:
+            # Case-insensitive search on name or email
+            query_filter["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+            ]
+        if status_filter:
+            query_filter["status"] = status_filter
+        
+        # Determine sort direction
+        sort_direction = -1 if sort_order == "desc" else 1
+        valid_sort_fields = ["created_at", "scheduled_at", "name", "email"]
+        if sort_by not in valid_sort_fields:
+            sort_by = "created_at"
+        
+        # Get total count
+        total = booking_service.col.count_documents(query_filter)
+        
+        # Calculate pagination
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        skip = (page - 1) * page_size
+        
+        # Fetch paginated results
+        cursor = booking_service.col.find(query_filter).sort(sort_by, sort_direction).skip(skip).limit(page_size)
         
         # Convert to BookingResponse format
         candidates = []
-        for booking in bookings:
-            candidates.append(BookingResponse(
-                token=booking.get('token', ''),
-                name=booking.get('name', ''),
-                email=booking.get('email', ''),
-                phone=booking.get('phone', ''),
-                scheduled_at=booking.get('scheduled_at', ''),
-                created_at=booking.get('created_at', ''),
-                application_text=booking.get('application_text'),
-                application_url=booking.get('application_url'),
-            ))
+        for doc in cursor:
+            booking = booking_service._doc_to_booking(doc)
+            if booking:
+                candidates.append(BookingResponse(
+                    token=booking.get('token', ''),
+                    name=booking.get('name', ''),
+                    email=booking.get('email', ''),
+                    phone=booking.get('phone', ''),
+                    scheduled_at=booking.get('scheduled_at', ''),
+                    created_at=booking.get('created_at', ''),
+                    application_text=booking.get('application_text'),
+                    application_url=booking.get('application_url'),
+                ))
         
-        logger.info(f"[API] ✅ Found {len(candidates)} candidates")
-        return candidates
+        logger.info(f"[API] ✅ Returning {len(candidates)} candidates (page {page}/{total_pages}, total {total})")
+        
+        return PaginatedCandidatesResponse(
+            items=candidates,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1,
+        )
     except Exception as e:
         logger.error(f"[API] Error fetching candidates: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -1934,10 +2060,8 @@ async def enroll_user(
                 logger.warning(f"[API] ⚠️ Failed to assign slots: {str(e)}")
         
         # Send enrollment email in background using FastAPI BackgroundTasks
-        print(f"[API] 📧 Preparing to send enrollment email to {request.email}")
         logger.info(f"[API] 📧 Preparing to send enrollment email to {request.email}")
-        print(f"[API] 📧 Temporary password generated: {temporary_password}")
-        logger.info(f"[API] 📧 Temporary password generated: {temporary_password}")
+        logger.info("[API] 📧 Temporary password generated (redacted)")
         
         # Send enrollment email - try to send it, but don't block if it fails
         # We'll send it in background but also track the status
@@ -1947,12 +2071,12 @@ async def enroll_user(
         async def send_enrollment_email_bg():
             nonlocal email_sent, email_error
             try:
-                print(f"[API] 📧 ===== BACKGROUND TASK EXECUTING ===== {request.email}")
+                logger.debug(f"[API] 📧 ===== BACKGROUND TASK EXECUTING ===== {request.email}")
                 logger.info(f"[API] 📧 ===== BACKGROUND TASK EXECUTING ===== {request.email}")
-                print(f"[API] 📧 Background task STARTED - sending enrollment email to {request.email}")
+                logger.debug(f"[API] 📧 Background task STARTED - sending enrollment email to {request.email}")
                 logger.info(f"[API] 📧 Background task started - sending enrollment email to {request.email}")
                 
-                print(f"[API] 📧 About to call email_service.send_enrollment_email...")
+                logger.debug(f"[API] 📧 About to call email_service.send_enrollment_email...")
                 success, error = await email_service.send_enrollment_email(
                     to_email=request.email,
                     name=request.name,
@@ -1964,16 +2088,14 @@ async def enroll_user(
                 email_error = error
                 
                 if success:
-                    print(f"[API] ✅ Enrollment email sent successfully to {request.email}")
+                    logger.debug(f"[API] ✅ Enrollment email sent successfully to {request.email}")
                     logger.info(f"[API] ✅ Enrollment email sent successfully to {request.email}")
                 else:
-                    print(f"[API] ❌ Enrollment email failed to send to {request.email}: {error}")
+                    logger.debug(f"[API] ❌ Enrollment email failed to send to {request.email}: {error}")
                     logger.error(f"[API] ❌ Enrollment email failed to send to {request.email}: {error}")
             except Exception as e:
                 email_error = str(e)
-                print(f"[API] ❌ Exception while sending enrollment email to {request.email}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.debug(f"[API] ❌ Exception while sending enrollment email to {request.email}: {str(e)}")
                 logger.error(f"[API] ❌ Exception while sending enrollment email to {request.email}: {str(e)}", exc_info=True)
         
         # Create background task - ensure it's scheduled
@@ -1981,16 +2103,16 @@ async def enroll_user(
             task = asyncio.create_task(send_enrollment_email_bg())
             # Give it a moment to start
             await asyncio.sleep(0.1)  # Small delay to let task start
-            print(f"[API] 📧 Email task created and scheduled: {task} for {request.email}")
+            logger.debug(f"[API] 📧 Email task created and scheduled: {task} for {request.email}")
             logger.info(f"[API] 📧 Email task created for {request.email}")
         except Exception as e:
             email_error = f"Failed to create email task: {str(e)}"
-            print(f"[API] ❌ {email_error}")
+            logger.debug(f"[API] ❌ {email_error}")
             logger.error(f"[API] ❌ {email_error}", exc_info=True)
-        print(f"[API] 📧 Enrollment email task added to background tasks for {request.email}")
+        logger.debug(f"[API] 📧 Enrollment email task added to background tasks for {request.email}")
         logger.info(f"[API] 📧 Enrollment email task added to background tasks for {request.email}")
         
-        print(f"[API] ✅ User enrolled: {request.email}")
+        logger.debug(f"[API] ✅ User enrolled: {request.email}")
         logger.info(f"[API] ✅ User enrolled: {request.email}")
         
         # Add email status to response (ensure optional fields for UserResponse)
@@ -1998,8 +2120,8 @@ async def enroll_user(
         user_dict.setdefault('updated_at', None)
         user_dict['email_sent'] = email_sent
         user_dict['email_error'] = email_error
-        user_dict['temporary_password'] = temporary_password  # Include for testing (remove in production)
-        
+        # Do not include temporary_password in response (security)
+
         return UserResponse(**user_dict)
         
     except HTTPException:
@@ -2181,12 +2303,17 @@ async def bulk_enroll_users(
 
 
 @app.get("/api/admin/users", response_model=List[UserResponse])
-async def get_all_users(current_admin: dict = Depends(get_current_admin)):
+async def get_all_users(
+    current_admin: dict = Depends(get_current_admin),
+    limit: Optional[int] = None,
+    skip: Optional[int] = None,
+):
     """
-    Get all enrolled users.
+    Get all enrolled users with optional pagination.
+    Query params: limit (max 500), skip. Omit for full list.
     """
     try:
-        users = user_service.get_all_users()
+        users = user_service.get_all_users(limit=limit, skip=skip)
         return [UserResponse(**user) for user in users]
     except Exception as e:
         error_msg = f"Failed to fetch users: {str(e)}"
@@ -3368,6 +3495,15 @@ async def upload_application_form(
         
         # Read file content
         file_content = await file.read()
+        
+        # Validate file type and size (max 5MB, PDF/DOC/DOCX only)
+        try:
+            resume_service.validate_file(file_content, file.filename, file.content_type)
+        except ValueError as ve:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(ve)
+            )
         
         # Upload to storage
         try:

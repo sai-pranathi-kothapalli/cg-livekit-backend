@@ -119,10 +119,8 @@ class EmailService:
             return False, "Email service not configured"
         
         try:
-            print(f"[EmailService] 📧 ===== EMAIL SERVICE CALLED ===== {to_email}")
             logger.info(f"[EmailService] 📧 Preparing enrollment email for {to_email}")
-            print(f"[EmailService] 📧 SMTP Config: host={self.config.smtp.host}, port={self.config.smtp.port}, user={self.config.smtp.user}")
-            logger.info(f"[EmailService] 📧 SMTP Config: host={self.config.smtp.host}, port={self.config.smtp.port}, user={self.config.smtp.user}")
+            logger.debug(f"[EmailService] SMTP Config: host={self.config.smtp.host}, port={self.config.smtp.port}, user={self.config.smtp.user}")
             
             # Create email message
             message = MIMEMultipart("alternative")
