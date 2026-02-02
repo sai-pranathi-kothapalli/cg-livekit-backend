@@ -66,7 +66,7 @@ class GeminiConfig:
 class SileroVADConfig:
     """Silero VAD configuration"""
     min_speech_duration: float = 0.2  # Reduced for better sensitivity
-    min_silence_duration: float = 0.8  # Reduced for faster response
+    min_silence_duration: float = 5.0  # Seconds of silence before considering user done (wait before next question)
     activation_threshold: float = 0.5  # Standard sensitivity
 
 
@@ -95,6 +95,8 @@ class ServerConfig:
     host: str
     port: int
     frontend_url: str = ""
+    # Public URL for links in emails (login, interview). Use e.g. https://interview.skillifire.com
+    public_frontend_url: str = ""
 
 
 @dataclass
@@ -227,7 +229,7 @@ class Config:
             ),
             silero_vad=SileroVADConfig(
                 min_speech_duration=float(os.getenv("SILERO_MIN_SPEECH_DURATION", "0.3")),
-                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "0.8")),
+                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "5.0")),
                 activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.6")),
             ),
             gemini_llm=GeminiConfig(
@@ -251,6 +253,7 @@ class Config:
                 host=os.getenv("SERVER_HOST", "0.0.0.0"),
                 port=int(os.getenv("SERVER_PORT", "8000")),
                 frontend_url=os.getenv("NEXT_PUBLIC_APP_URL") or os.getenv("FRONTEND_URL", ""),
+                public_frontend_url=(os.getenv("PUBLIC_FRONTEND_URL") or os.getenv("FRONTEND_PUBLIC_URL") or "").strip(),
             ),
             MAX_APPLICATION_LENGTH=int(os.getenv("MAX_APPLICATION_LENGTH", "3000")),
             ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",

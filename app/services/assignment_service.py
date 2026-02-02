@@ -81,3 +81,14 @@ class AssignmentService:
         except Exception as e:
             logger.error(f"Error cancelling other assignments: {e}")
             return False
+
+    def delete_assignments_by_user_id(self, user_id: str) -> int:
+        """Delete all slot assignments for a user_id. Returns count deleted."""
+        try:
+            r = self.col.delete_many({"user_id": user_id})
+            if r.deleted_count > 0:
+                logger.info(f"[AssignmentService] Deleted {r.deleted_count} assignment(s) for user_id={user_id}")
+            return r.deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting assignments by user_id: {e}")
+            return 0

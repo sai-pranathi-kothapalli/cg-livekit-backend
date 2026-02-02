@@ -166,3 +166,16 @@ class TranscriptStorageService:
         except Exception as e:
             logger.error(f"Error fetching transcript tokens: {e}")
             return set()
+
+    def delete_by_booking_tokens(self, tokens: List[str]) -> int:
+        """Delete transcript documents for the given booking tokens. Returns count deleted."""
+        if not tokens:
+            return 0
+        try:
+            r = self.col.delete_many({"booking_token": {"$in": tokens}})
+            if r.deleted_count > 0:
+                logger.info(f"[TranscriptStorage] Deleted {r.deleted_count} transcript(s) for {len(tokens)} token(s)")
+            return r.deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting transcripts by tokens: {e}")
+            return 0

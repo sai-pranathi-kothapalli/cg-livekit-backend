@@ -245,6 +245,7 @@ class BookingResponse(BaseModel):
     created_at: str
     application_text: Optional[str] = None
     application_url: Optional[str] = None
+    application_form_submitted: Optional[bool] = None  # True/False when booking has user_id; must be True to attend
 
 
 class PaginatedCandidatesResponse(BaseModel):
@@ -889,6 +890,19 @@ async def get_booking(
         
         # Include slot data if booking has slot_id
         booking_dict = dict(booking)
+        # Set application_form_submitted so frontend can block join until form is submitted
+        booking_user_id = booking_dict.get('user_id')
+        if booking_user_id:
+            try:
+                application_form = application_form_service.get_form_by_user_id(booking_user_id)
+                booking_dict['application_form_submitted'] = bool(
+                    application_form and application_form.get('status') == 'submitted'
+                )
+            except Exception as e:
+                logger.warning(f"[API] Failed to check application form for booking: {e}")
+                booking_dict['application_form_submitted'] = False
+        else:
+            booking_dict['application_form_submitted'] = None  # no user_id, no check
         slot_id = booking_dict.get('slot_id')
         if slot_id:
             try:
@@ -1146,6 +1160,31 @@ async def connection_details(
                     else:
                         # If booking has no user_id, allow access (for backward compatibility with old bookings)
                         logger.warning(f"[API] ⚠️  Booking {request.token} has no user_id - allowing access for backward compatibility")
+                
+                # Require booking to be linked to a user (so we can enforce application form)
+                booking_user_id = booking.get("user_id")
+                if not booking_user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="This interview link is not assigned to a user. Please use the link from your enrollment email or contact the administrator."
+                    )
+                # Require application form to be submitted before attending interview
+                try:
+                    application_form = application_form_service.get_form_by_user_id(booking_user_id)
+                    if not application_form or application_form.get("status") != "submitted":
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Please complete and submit your application form before attending the interview. Go to 'Application Form' or 'My Profile' in your dashboard to fill and submit it."
+                        )
+                    logger.info(f"[API] ✅ Application form submitted for user {booking_user_id}")
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(f"[API] Failed to check application form for connection-details: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Please complete and submit your application form before attending the interview."
+                    )
                 
                 # Validate interview time window (can only join during the scheduled interview time)
                 if booking.get("scheduled_at"):
@@ -1987,7 +2026,7 @@ async def enroll_user(
             try:
                 now = get_now_ist()
                 two_days_from_now = now + timedelta(days=2)
-                all_slots = slot_service.get_slots(status='active', admin_view=False)
+                all_slots = slot_service.get_all_slots(status='active', include_past=False)
                 
                 target_slot_ids = []
                 for slot in all_slots:
@@ -2183,7 +2222,7 @@ async def bulk_enroll_users(
         # Get active slots for next 2 days for auto-assignment
         now_dt = get_now_ist()
         two_days_from_now = now_dt + timedelta(days=2)
-        all_slots = slot_service.get_slots(status='active', admin_view=False)
+        all_slots = slot_service.get_all_slots(status='active', include_past=False)
         auto_assign_slot_ids = []
         for slot in all_slots:
             try:
@@ -2386,15 +2425,70 @@ async def update_user(
 @app.delete("/api/admin/users/{user_id}")
 async def delete_user(user_id: str, current_admin: dict = Depends(get_current_admin)):
     """
-    Delete an enrolled user.
+    Delete an enrolled user and all associated data: bookings, transcripts, evaluations,
+    slot assignments, application form, enrolled user record, and student login account.
     """
     try:
+        user = user_service.get_user(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        email = user.get("email")
+
+        # 1. Get booking tokens for this user (before deleting bookings)
+        bookings = booking_service.get_bookings_by_user_id(user_id)
+        booking_tokens = [b.get("token") for b in bookings if b.get("token")]
+
+        # 2. Delete transcripts for those bookings
+        if booking_tokens:
+            try:
+                transcript_storage_service.delete_by_booking_tokens(booking_tokens)
+            except Exception as e:
+                logger.warning(f"[API] Could not delete transcripts for user {user_id}: {e}")
+
+        # 3. Delete evaluations for those bookings
+        if booking_tokens:
+            try:
+                evaluation_service.delete_evaluations_by_booking_tokens(booking_tokens)
+            except Exception as e:
+                logger.warning(f"[API] Could not delete evaluations for user {user_id}: {e}")
+
+        # 4. Delete all bookings for this user
+        try:
+            booking_service.delete_bookings_by_user_id(user_id)
+        except Exception as e:
+            logger.warning(f"[API] Could not delete bookings for user {user_id}: {e}")
+
+        # 5. Delete all slot assignments for this user
+        try:
+            assignment_service.delete_assignments_by_user_id(user_id)
+        except Exception as e:
+            logger.warning(f"[API] Could not delete assignments for user {user_id}: {e}")
+
+        # 6. Delete application form for this user
+        try:
+            application_form_service.delete_form_by_user_id(user_id)
+        except Exception as e:
+            logger.warning(f"[API] Could not delete application form for user {user_id}: {e}")
+
+        # 7. Delete enrolled user record
         success = user_service.delete_user(user_id)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
+
+        # 8. Delete student login account so the same email can be re-enrolled
+        if email:
+            try:
+                auth_service.delete_student_by_email(email)
+            except Exception as e:
+                logger.warning(f"[API] Could not delete student auth for {email}: {e}")
+
+        logger.info(f"[API] ✅ Deleted user {user_id} and all associated data")
         return {"success": True}
     except HTTPException:
         raise
@@ -2405,6 +2499,32 @@ async def delete_user(user_id: str, current_admin: dict = Depends(get_current_ad
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
         )
+
+
+class RemoveStudentAuthRequest(BaseModel):
+    email: str
+
+
+@app.post("/api/admin/users/remove-student-auth")
+async def remove_student_auth_by_email(
+    request: RemoveStudentAuthRequest,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Remove only the student login account for an email (cleanup when user was deleted before
+    the fix that also deletes student auth). Use so the email can be re-enrolled.
+    """
+    email = (request.email or "").strip()
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="email is required")
+    try:
+        deleted = auth_service.delete_student_by_email(email)
+        if deleted:
+            return {"success": True, "message": f"Student login removed for {email}. You can now re-enroll this email."}
+        return {"success": False, "message": f"No student account found for {email}."}
+    except Exception as e:
+        logger.error(f"[API] remove_student_auth: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 # ==================== Admin Interview Scheduling Endpoints ====================
@@ -3623,11 +3743,12 @@ async def upload_application_form(
             if bool_field not in form_data:
                 form_data[bool_field] = False
         
-        # Save as 'draft' so user can review/edit (consistent with manual form workflow)
+        # Save as 'submitted' so details show in Application Details view (same as manual submit).
+        # User can still click "Edit Application" to change anything.
         form = application_form_service.create_or_update_form(
             enrolled_user['id'],
             form_data,
-            status='draft'
+            status='submitted'
         )
         
         logger.info(f"[API] ✅ Application form uploaded & parsed for user {enrolled_user['id']}")

@@ -166,6 +166,18 @@ class AuthService:
             logger.error(f"[AuthService] Failed to create student: {str(e)}", exc_info=True)
             raise AgentError(f"Failed to create student user: {str(e)}", "auth")
 
+    def delete_student_by_email(self, email: str) -> bool:
+        """Delete student login account by email. Use when admin removes an enrolled user so they can be re-enrolled."""
+        try:
+            r = self.students.delete_one({"email": email})
+            if r.deleted_count > 0:
+                logger.info(f"[AuthService] ✅ Deleted student account: {email}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[AuthService] Failed to delete student by email: {str(e)}", exc_info=True)
+            return False
+
     def get_student_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get student by email. Returns dict with id, email, name, etc. (no password_hash)."""
         try:

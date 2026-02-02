@@ -61,13 +61,13 @@ class ApplicationFormService:
                 "updated_at": get_now_ist().isoformat(),
                 **data,
             }
+            if status == "submitted":
+                form_data["submitted_at"] = get_now_ist().isoformat()
             if existing:
                 self.col.update_one({"user_id": user_id}, {"$set": form_data})
                 doc = self.col.find_one({"user_id": user_id})
             else:
                 form_data["created_at"] = get_now_ist().isoformat()
-                if status == "submitted":
-                    form_data["submitted_at"] = get_now_ist().isoformat()
                 r = self.col.insert_one(form_data)
                 doc = self.col.find_one({"_id": r.inserted_id})
             if not doc:
@@ -77,3 +77,14 @@ class ApplicationFormService:
         except Exception as e:
             logger.error(f"Error upserting form: {e}", exc_info=True)
             raise AgentError(f"Failed to upsert form: {str(e)}", "ApplicationFormService")
+
+    def delete_form_by_user_id(self, user_id: str) -> bool:
+        """Delete application form for a user_id. Returns True if a document was deleted."""
+        try:
+            r = self.col.delete_many({"user_id": user_id})
+            if r.deleted_count > 0:
+                logger.info(f"[ApplicationFormService] Deleted form(s) for user_id={user_id}")
+            return r.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting form by user_id: {e}")
+            return False

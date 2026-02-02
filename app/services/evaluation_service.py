@@ -191,6 +191,24 @@ class EvaluationService:
             logger.error(f"Error fetching evaluation tokens: {e}")
             return set()
 
+    def delete_evaluations_by_booking_tokens(self, tokens: List[str]) -> int:
+        """Delete evaluation documents and their round evaluations for the given booking tokens. Returns count deleted."""
+        if not tokens:
+            return 0
+        try:
+            # Get evaluation ids for these booking tokens so we can delete round evaluations first
+            cursor = self.evals.find({"booking_token": {"$in": tokens}}, {"_id": 1})
+            evaluation_ids = [str(doc["_id"]) for doc in cursor]
+            if evaluation_ids:
+                self.rounds.delete_many({"evaluation_id": {"$in": evaluation_ids}})
+            r = self.evals.delete_many({"booking_token": {"$in": tokens}})
+            if r.deleted_count > 0:
+                logger.info(f"[EvaluationService] Deleted {r.deleted_count} evaluation(s) for {len(tokens)} token(s)")
+            return r.deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting evaluations by tokens: {e}")
+            return 0
+
     async def _analyze_with_gemini(
         self,
         transcript: List[Dict[str, Any]],

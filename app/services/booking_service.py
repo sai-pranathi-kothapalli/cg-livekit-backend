@@ -144,6 +144,19 @@ class BookingService:
             logger.error(f"Error fetching bookings by user_id: {e}")
             return []
 
+    def delete_bookings_by_user_id(self, user_id: str) -> List[str]:
+        """Delete all bookings for a user_id. Returns list of booking tokens that were deleted."""
+        try:
+            cursor = self.col.find({"user_id": user_id}, {"token": 1})
+            tokens = [d["token"] for d in cursor if d.get("token")]
+            if tokens:
+                self.col.delete_many({"user_id": user_id})
+                logger.info(f"[BookingService] Deleted {len(tokens)} booking(s) for user_id={user_id}")
+            return tokens
+        except Exception as e:
+            logger.error(f"Error deleting bookings by user_id: {e}")
+            return []
+
     def upload_application_to_storage(self, file_content: bytes, filename: str) -> str:
         """Upload an application file to MongoDB GridFS and return the file URL."""
         try:

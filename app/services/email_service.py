@@ -160,8 +160,14 @@ class EmailService:
             return False, error_msg
     
     def _create_enrollment_email_html(self, name: str, email: str, temporary_password: str) -> str:
-        """Create HTML email content for enrollment"""
-        login_url = f"{self.config.server.frontend_url.rstrip('/')}/login"
+        """Create HTML email content for enrollment. Login link uses PUBLIC_FRONTEND_URL or FRONTEND_URL."""
+        base = (
+            getattr(self.config.server, "public_frontend_url", None)
+            or self.config.server.frontend_url
+            or "https://interview.skillifire.com"
+        )
+        base = (base or "").strip().rstrip("/")
+        login_url = f"{base}/login" if base else "/login"
         return f"""
 <!DOCTYPE html>
 <html>
@@ -220,7 +226,7 @@ class EmailService:
             </ol>
             
             <div style="text-align: center;">
-                <a href="{login_url}" class="button">Login Now</a>
+                <a href="{login_url}" class="button" style="color: #ffffff !important; background-color: #002cf2; text-decoration: none;">Login Now</a>
             </div>
             
             <div class="warning" style="margin-top: 20px;">
@@ -285,7 +291,7 @@ class EmailService:
             <p><strong>Your unique interview link is ready!</strong> Click the button below to join your interview at the scheduled time:</p>
             
             <div style="text-align: center;">
-                <a href="{interview_url}" class="button">Join Interview</a>
+                <a href="{interview_url}" class="button" style="color: #ffffff !important; background-color: #002cf2; text-decoration: none;">Join Interview</a>
             </div>
             
             <p style="font-size: 14px; color: #666; margin-top: 30px;">
