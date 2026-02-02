@@ -61,13 +61,13 @@ class ApplicationFormService:
                 "updated_at": get_now_ist().isoformat(),
                 **data,
             }
-            if status == "submitted":
-                form_data["submitted_at"] = get_now_ist().isoformat()
             if existing:
                 self.col.update_one({"user_id": user_id}, {"$set": form_data})
                 doc = self.col.find_one({"user_id": user_id})
             else:
                 form_data["created_at"] = get_now_ist().isoformat()
+                if status == "submitted":
+                    form_data["submitted_at"] = get_now_ist().isoformat()
                 r = self.col.insert_one(form_data)
                 doc = self.col.find_one({"_id": r.inserted_id})
             if not doc:

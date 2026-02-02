@@ -115,7 +115,7 @@ async def startup_log_db():
     try:
         db["students"].create_index("email", unique=True)
         db["admin_users"].create_index("username", unique=True)
-        db["enrolled_users"].create_index("email")
+        db["enrolled_users"].create_index("email", unique=True)
         db["bookings"].create_index("token", unique=True)
         db["bookings"].create_index([("user_id", 1), ("scheduled_at", 1)])
         db["bookings"].create_index("scheduled_at")
@@ -1161,30 +1161,25 @@ async def connection_details(
                         # If booking has no user_id, allow access (for backward compatibility with old bookings)
                         logger.warning(f"[API] ⚠️  Booking {request.token} has no user_id - allowing access for backward compatibility")
                 
-                # Require booking to be linked to a user (so we can enforce application form)
-                booking_user_id = booking.get("user_id")
-                if not booking_user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="This interview link is not assigned to a user. Please use the link from your enrollment email or contact the administrator."
-                    )
                 # Require application form to be submitted before attending interview
-                try:
-                    application_form = application_form_service.get_form_by_user_id(booking_user_id)
-                    if not application_form or application_form.get("status") != "submitted":
+                booking_user_id = booking.get("user_id")
+                if booking_user_id:
+                    try:
+                        application_form = application_form_service.get_form_by_user_id(booking_user_id)
+                        if not application_form or application_form.get("status") != "submitted":
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Please complete and submit your application form before attending the interview. Go to 'Application Form' or 'My Profile' in your dashboard to fill and submit it."
+                            )
+                        logger.info(f"[API] ✅ Application form submitted for user {booking_user_id}")
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[API] Failed to check application form for connection-details: {e}")
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Please complete and submit your application form before attending the interview. Go to 'Application Form' or 'My Profile' in your dashboard to fill and submit it."
+                            detail="Please complete and submit your application form before attending the interview."
                         )
-                    logger.info(f"[API] ✅ Application form submitted for user {booking_user_id}")
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    logger.warning(f"[API] Failed to check application form for connection-details: {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Please complete and submit your application form before attending the interview."
-                    )
                 
                 # Validate interview time window (can only join during the scheduled interview time)
                 if booking.get("scheduled_at"):
@@ -3743,12 +3738,11 @@ async def upload_application_form(
             if bool_field not in form_data:
                 form_data[bool_field] = False
         
-        # Save as 'submitted' so details show in Application Details view (same as manual submit).
-        # User can still click "Edit Application" to change anything.
+        # Save as 'draft' so user can review/edit (consistent with manual form workflow)
         form = application_form_service.create_or_update_form(
             enrolled_user['id'],
             form_data,
-            status='submitted'
+            status='draft'
         )
         
         logger.info(f"[API] ✅ Application form uploaded & parsed for user {enrolled_user['id']}")
