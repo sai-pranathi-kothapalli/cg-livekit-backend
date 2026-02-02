@@ -187,6 +187,10 @@ class Config:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         if not openai_base_url:
             raise ValueError("OPENAI_BASE_URL environment variable is required")
+        # OpenAI client sends to {base_url}/chat/completions; most proxies expect .../v1/chat/completions
+        openai_base_url = openai_base_url.rstrip("/")
+        if not openai_base_url.endswith("/v1"):
+            openai_base_url = f"{openai_base_url}/v1"
         if not tts_base_url:
             raise ValueError("TTS_BASE_URL environment variable is required")
         if not stt_base_url:
