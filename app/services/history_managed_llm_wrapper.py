@@ -290,6 +290,7 @@ class HistoryManagedContextWrapper:
         self._skip_transcript = skip_transcript  # NEW: Skip transcript for greeting
         self._accumulated_text = ""
         self._last_sent_length = 0
+        self._last_sent_text = ""  # Avoid sending same transcript twice (e.g. gate replacement)
         self._entered = False
         self._forwarded = False
         self._conversation_id = None
@@ -298,6 +299,7 @@ class HistoryManagedContextWrapper:
         """Enter the original context manager"""
         self._accumulated_text = ""
         self._last_sent_length = 0
+        self._last_sent_text = ""
         self._forwarded = False
         self._conversation_id = id(self)
         
@@ -325,8 +327,9 @@ class HistoryManagedContextWrapper:
                     # Forward transcript (strip echoed system context so it doesn't show in UI)
                     try:
                         to_send = _strip_system_context_from_transcript(self._accumulated_text)
-                        if to_send:
+                        if to_send and to_send != self._last_sent_text:
                             await self._transcript_service.send_transcript(to_send)
+                            self._last_sent_text = to_send
                         self._last_sent_length = len(self._accumulated_text)
                     except Exception as e:
                         logger.error(f"Failed to send transcript: {e}", exc_info=True)
@@ -380,8 +383,9 @@ class HistoryManagedContextWrapper:
                         if should_send:
                             try:
                                 to_send = _strip_system_context_from_transcript(self._accumulated_text)
-                                if to_send:
+                                if to_send and to_send != self._last_sent_text:
                                     await self._transcript_service.send_transcript(to_send)
+                                    self._last_sent_text = to_send
                                 self._last_sent_length = len(self._accumulated_text)
                             except Exception as e:
                                 logger.warning(f"[WARN] Incremental transcript send failed: {e}")
@@ -402,8 +406,9 @@ class HistoryManagedContextWrapper:
                         )
                         try:
                             to_send = _strip_system_context_from_transcript(self._accumulated_text)
-                            if to_send:
+                            if to_send and to_send != self._last_sent_text:
                                 await self._transcript_service.send_transcript(to_send)
+                                self._last_sent_text = to_send
                             self._last_sent_length = len(self._accumulated_text)
                             self._forwarded = True  # Mark as forwarded to prevent duplicate
                         except Exception as e:

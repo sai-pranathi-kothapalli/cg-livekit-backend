@@ -233,7 +233,7 @@ class Config:
             ),
             silero_vad=SileroVADConfig(
                 min_speech_duration=float(os.getenv("SILERO_MIN_SPEECH_DURATION", "0.3")),
-                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "5.0")),
+                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "4.0")),
                 activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.6")),
             ),
             gemini_llm=GeminiConfig(
