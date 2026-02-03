@@ -36,6 +36,16 @@ _NEXT_FIELD_LABELS = (
     "Regional Rural Bank", "RRB", "Exam Center", "Medium of Paper",
 )
 
+# Section headers in IBPS RRB / CRP application forms. Order matters for chunking.
+# Each tuple: (chunk_key, regex_pattern). Pattern is used to find section start (case-insensitive).
+_SECTION_HEADERS = (
+    ("personal", re.compile(r"Personal\s+Details?", re.IGNORECASE)),
+    ("correspondence_address", re.compile(r"Correspondence\s+Address|Address\s+Details?", re.IGNORECASE)),
+    ("permanent_address", re.compile(r"Permanent\s+Address", re.IGNORECASE)),
+    ("education", re.compile(r"Educational\s+Qualification|Education\s+Details?|SSC\s*[\/]?\s*HSC|Graduation", re.IGNORECASE)),
+    ("other", re.compile(r"Other\s+Details?|Declaration|Preference|Exam\s+Center|State\s+Applying", re.IGNORECASE)),
+)
+
 
 class ResumeService:
     """Service for processing application files"""
@@ -219,125 +229,169 @@ class ResumeService:
                 continue
         return raw
 
+    def _chunk_by_sections(self, text: str) -> Dict[str, str]:
+        """
+        Split normalized text into sections by IBPS RRB form headers.
+        Returns dict: personal, correspondence_address, permanent_address, education, other.
+        Each value is the text from that section header up to the next section (or end).
+        Falls back to full text for a key if section not found.
+        """
+        chunks: Dict[str, str] = {}
+        # Find start index of each section
+        matches: list[Tuple[str, int]] = []
+        for key, pat in _SECTION_HEADERS:
+            for m in pat.finditer(text):
+                matches.append((key, m.start()))
+                break  # first occurrence per section type
+        # Sort by position so we can slice between consecutive sections
+        matches.sort(key=lambda x: x[1])
+        full = text
+        for i, (key, start) in enumerate(matches):
+            end = matches[i + 1][1] if i + 1 < len(matches) else len(full)
+            chunk = full[start:end].strip()
+            if chunk:
+                chunks[key] = chunk
+        # If no sections found, treat whole text as personal (fallback)
+        if not chunks:
+            chunks["personal"] = full
+        # Ensure we have all keys for consistent lookup; missing = use full text
+        for key, _ in _SECTION_HEADERS:
+            if key not in chunks:
+                chunks[key] = full
+        return chunks
+
     async def parse_application_data(self, text: str) -> Dict[str, Any]:
         """
         Parse extracted text into structured application data using regex/heuristics only.
-        No external API keys (Gemini, OpenAI, etc.). Suited for IBPS RRB / CRP-style forms.
+        Chunks text by section first, then extracts each field from the relevant section.
+        No external API keys. Suited for IBPS RRB / CRP-style forms.
         """
         if not text or len(text.strip()) < 10:
             return {}
         text_clean = self._clean_text(text)
+        chunks = self._chunk_by_sections(text_clean)
+        # Resolve which text to use per field (section chunk or full-text fallback)
+        personal = chunks.get("personal", text_clean)
+        corr_addr = chunks.get("correspondence_address", text_clean)
+        perm_addr = chunks.get("permanent_address", text_clean)
+        education = chunks.get("education", text_clean)
+        other = chunks.get("other", text_clean)
         out: Dict[str, Any] = {}
 
-        # Personal details – label variants for IBPS RRB forms
+        # Personal details – from personal section only
         full_name = self._extract_label_value(
-            text_clean,
+            personal,
             ("Full Name", "Name", "Candidate Name", "Applicant Name"),
         )
         if full_name:
             out["full_name"] = full_name
 
         post = self._extract_label_value(
-            text_clean,
+            personal,
             ("Post", "Post Applied", "Applied For"),
         )
         if post:
             out["post"] = post
 
         category = self._extract_label_value(
-            text_clean,
+            personal,
             ("Category", "Caste Category", "Category (NCL)"),
         )
         if category:
             out["category"] = category
 
         dob_raw = self._extract_label_value(
-            text_clean,
+            personal,
             ("Date of Birth", "DOB", "D.O.B", "Birth Date"),
         )
         if dob_raw:
             out["date_of_birth"] = self._normalize_date(dob_raw) or dob_raw
 
         gender = self._extract_label_value(
-            text_clean,
+            personal,
             ("Gender", "Sex"),
         )
         if gender:
             out["gender"] = gender.strip().upper()
 
         marital = self._extract_label_value(
-            text_clean,
+            personal,
             ("Marital Status", "Marital", "Marriage Status"),
         )
         if marital:
             out["marital_status"] = marital.strip()
 
         aadhaar = self._extract_label_value(
-            text_clean,
+            personal,
             ("Aadhaar", "Aadhaar Card Number", "Aadhar", "UID"),
         )
         if aadhaar:
             out["aadhaar_number"] = aadhaar.strip()
 
         pan = self._extract_label_value(
-            text_clean,
+            personal,
             ("PAN", "PAN Card Number", "Permanent Account Number"),
         )
         if pan:
             out["pan_number"] = pan.strip()
 
         father = self._extract_label_value(
-            text_clean,
+            personal,
             ("Father's Name", "Father Name", "Fathers Name"),
         )
         if father:
             out["father_name"] = father
 
         mother = self._extract_label_value(
-            text_clean,
+            personal,
             ("Mother's Name", "Mother Name", "Mothers Name"),
         )
         if mother:
             out["mother_name"] = mother
 
         spouse = self._extract_label_value(
-            text_clean,
+            personal,
             ("Spouse's Name", "Spouse Name", "Spouse"),
         )
         if spouse:
             out["spouse_name"] = spouse
 
-        # Address – correspondence
+        # Correspondence address – from correspondence section
         for key, labels in (
             ("correspondence_address1", ("Correspondence Address", "Address Line 1", "Address 1", "Correspondence Add")),
             ("correspondence_state", ("Correspondence State", "State", "Correspondence State")),
             ("correspondence_district", ("Correspondence District", "District", "Corr District")),
             ("correspondence_pincode", ("Correspondence Pincode", "Pincode", "Pin Code", "PIN")),
         ):
-            v = self._extract_label_value(text_clean, labels)
+            v = self._extract_label_value(corr_addr, labels)
             if v:
                 out[key] = v
 
-        # Permanent address
+        # Permanent address – from permanent section
         for key, labels in (
             ("permanent_address1", ("Permanent Address", "Permanent Add", "Address Line 1")),
             ("permanent_state", ("Permanent State", "Permanent State")),
             ("permanent_district", ("Permanent District", "Permanent District")),
             ("permanent_pincode", ("Permanent Pincode", "Permanent Pin")),
         ):
-            v = self._extract_label_value(text_clean, labels)
+            v = self._extract_label_value(perm_addr, labels)
             if v:
                 out[key] = v
 
-        # Contact
+        # Contact – personal or full (often near personal)
         mobile = self._extract_label_value(
-            text_clean,
+            personal,
             ("Mobile", "Mobile Number", "Phone", "Contact Number", "Mobile No"),
         )
+        if not mobile:
+            mobile = self._extract_label_value(
+                text_clean,
+                ("Mobile", "Mobile Number", "Phone", "Contact Number", "Mobile No"),
+            )
         if mobile:
             out["mobile_number"] = mobile.strip()
 
-        # Education
+        # Education – from education section only
         for key, labels in (
             ("ssc_board", ("SSC Board", "10th Board", "Board (SSC)")),
             ("ssc_passing_date", ("SSC Passing", "SSC Year", "10th Passing")),
@@ -350,51 +404,54 @@ class ResumeService:
             ("graduation_percentage", ("Graduation Percentage", "Graduation %")),
             ("graduation_class", ("Graduation Class", "Graduate Class")),
         ):
-            v = self._extract_label_value(text_clean, labels)
+            v = self._extract_label_value(education, labels)
             if v:
                 out[key] = v
 
-        # Other
-        religion = self._extract_label_value(text_clean, ("Religion", "Religious"))
+        # Other / preferences – from other section, fallback full text
+        religion = self._extract_label_value(other, ("Religion", "Religious"))
+        if not religion:
+            religion = self._extract_label_value(text_clean, ("Religion", "Religious"))
         if religion:
             out["religion"] = religion
 
         state_applying = self._extract_label_value(
-            text_clean,
+            other,
             ("State Applying For", "State Applying", "State (Applying)"),
         )
+        if not state_applying:
+            state_applying = self._extract_label_value(
+                text_clean,
+                ("State Applying For", "State Applying", "State (Applying)"),
+            )
         if state_applying:
             out["state_applying_for"] = state_applying
 
-        rrb = self._extract_label_value(
-            text_clean,
-            ("Regional Rural Bank", "RRB", "Bank Name", "Name of RRB"),
-        )
+        rrb = self._extract_label_value(other, ("Regional Rural Bank", "RRB", "Bank Name", "Name of RRB"))
+        if not rrb:
+            rrb = self._extract_label_value(text_clean, ("Regional Rural Bank", "RRB", "Bank Name", "Name of RRB"))
         if rrb:
             out["regional_rural_bank"] = rrb
 
-        exam1 = self._extract_label_value(
-            text_clean,
-            ("Exam Center Preference 1", "Exam Center 1", "Centre Preference 1"),
-        )
+        exam1 = self._extract_label_value(other, ("Exam Center Preference 1", "Exam Center 1", "Centre Preference 1"))
+        if not exam1:
+            exam1 = self._extract_label_value(text_clean, ("Exam Center Preference 1", "Exam Center 1", "Centre Preference 1"))
         if exam1:
             out["exam_center_preference1"] = exam1
 
-        exam2 = self._extract_label_value(
-            text_clean,
-            ("Exam Center Preference 2", "Exam Center 2", "Centre Preference 2"),
-        )
+        exam2 = self._extract_label_value(other, ("Exam Center Preference 2", "Exam Center 2", "Centre Preference 2"))
+        if not exam2:
+            exam2 = self._extract_label_value(text_clean, ("Exam Center Preference 2", "Exam Center 2", "Centre Preference 2"))
         if exam2:
             out["exam_center_preference2"] = exam2
 
-        medium = self._extract_label_value(
-            text_clean,
-            ("Medium of Paper", "Medium", "Paper Medium"),
-        )
+        medium = self._extract_label_value(other, ("Medium of Paper", "Medium", "Paper Medium"))
+        if not medium:
+            medium = self._extract_label_value(text_clean, ("Medium of Paper", "Medium", "Paper Medium"))
         if medium:
             out["medium_of_paper"] = medium
 
-        logger.info(f"[ResumeService] Parsed {len(out)} fields from PDF (regex/heuristics, no API)")
+        logger.info(f"[ResumeService] Parsed {len(out)} fields from PDF (chunk-by-section, no API)")
         return out
 
     def _clean_text(self, text: str) -> str:

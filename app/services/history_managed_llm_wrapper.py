@@ -5,12 +5,59 @@ Wraps LLM chat to manage conversation history with intelligent truncation.
 """
 
 import asyncio
+import re
 import threading
 import uuid
 from typing import Any, Callable, AsyncContextManager, List, Dict, Optional
 from livekit import rtc
 
 from app.utils.logger import get_logger
+
+
+def _strip_system_context_from_transcript(text: str) -> str:
+    """
+    Remove echoed time-context / rule text from agent response so it does not
+    appear in the user-facing transcript (TIME REMAINING, RULE:, etc.).
+    """
+    if not text or not text.strip():
+        return text
+    # Remove leading block: from "TIME REMAINING" up to (but not including) actual reply
+    # Actual reply usually starts with Okay, Great, So, Hello, or a question (What/How/Why...)
+    leading_system = re.compile(
+        r"^\s*TIME REMAINING:.*?"
+        r"(?=Okay|Great|So(?:\s|,)|Alright|Hello|Hi\s|Sure|Well|Right|Now,|"
+        r"What\s+(?:year|have|did|are|is)|How\s+(?:did|have|are)|Why\s+|"
+        r"Thank you|Thanks for|I see\.|Good\.|Perfect\.)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    text = leading_system.sub("", text)
+    # Remove any remaining lines that are purely system context (model may add newlines)
+    lines = text.split("\n")
+    filtered = []
+    skip_phrases = (
+        "time remaining:",
+        "current: minute",
+        "rule: only when",
+        "do not conclude or say goodbye until",
+        "until you receive end_interview",
+        "keep asking one question from the question bank",
+        "you must not conclude",
+        "say we still have time and ask another question",
+        "when time remaining is 2 or less",
+        "when time remaining is 5 minutes or less",
+        "(same as the timer on top left",
+    )
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            filtered.append(line)
+            continue
+        line_lower = line_stripped.lower()
+        if any(phrase in line_lower for phrase in skip_phrases):
+            continue
+        filtered.append(line)
+    text = "\n".join(filtered)
+    return text.strip()
 
 # Thread-local storage to track greeting state
 _thread_local = threading.local()
@@ -275,9 +322,11 @@ class HistoryManagedContextWrapper:
                         f"{len(self._accumulated_text)} chars ({len(self._accumulated_text) - self._last_sent_length} unsent)"
                     )
                     
-                    # Forward transcript
+                    # Forward transcript (strip echoed system context so it doesn't show in UI)
                     try:
-                        await self._transcript_service.send_transcript(self._accumulated_text)
+                        to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                        if to_send:
+                            await self._transcript_service.send_transcript(to_send)
                         self._last_sent_length = len(self._accumulated_text)
                     except Exception as e:
                         logger.error(f"Failed to send transcript: {e}", exc_info=True)
@@ -330,7 +379,9 @@ class HistoryManagedContextWrapper:
                         
                         if should_send:
                             try:
-                                await self._transcript_service.send_transcript(self._accumulated_text)
+                                to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                                if to_send:
+                                    await self._transcript_service.send_transcript(to_send)
                                 self._last_sent_length = len(self._accumulated_text)
                             except Exception as e:
                                 logger.warning(f"[WARN] Incremental transcript send failed: {e}")
@@ -350,7 +401,9 @@ class HistoryManagedContextWrapper:
                             f"{len(self._accumulated_text)} chars"
                         )
                         try:
-                            await self._transcript_service.send_transcript(self._accumulated_text)
+                            to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                            if to_send:
+                                await self._transcript_service.send_transcript(to_send)
                             self._last_sent_length = len(self._accumulated_text)
                             self._forwarded = True  # Mark as forwarded to prevent duplicate
                         except Exception as e:
