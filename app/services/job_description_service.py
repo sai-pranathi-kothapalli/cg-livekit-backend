@@ -26,35 +26,26 @@ class JobDescriptionService:
         self.col = self.db["job_descriptions"]
 
     def get_job_description(self) -> Dict[str, Any]:
+        """Get interview/agent context from DB. Single 'context' field for admin-editable prompt."""
         try:
             doc = self.col.find_one({"jd_id": self.JD_KEY})
+            if doc and doc.get("context") is not None:
+                logger.info("[JobDescriptionService] Found job description (context) in database")
+                return {"context": doc.get("context", "")}
+            # Backward compatibility: if old doc has title/description but no context, return empty (agent will use fallback)
             if doc:
-                logger.info("[JobDescriptionService] Found job description in database")
-                return {
-                    "title": doc.get("title", ""),
-                    "description": doc.get("description", ""),
-                    "requirements": doc.get("requirements", ""),
-                    "preparation_areas": doc.get("preparation_areas", []),
-                }
-            return self._get_default_jd()
+                return {"context": doc.get("context", "")}
+            return {"context": ""}
         except Exception as e:
             logger.error(f"[JobDescriptionService] Error: {str(e)}", exc_info=True)
-            return self._get_default_jd()
+            return {"context": ""}
 
-    def update_job_description(
-        self,
-        title: str,
-        description: str,
-        requirements: str,
-        preparation_areas: list,
-    ) -> Dict[str, Any]:
+    def update_job_description(self, context: str) -> Dict[str, Any]:
+        """Update interview/agent context in DB. Admin edits this in Job Description section."""
         try:
             jd_data = {
                 "jd_id": self.JD_KEY,
-                "title": title,
-                "description": description,
-                "requirements": requirements,
-                "preparation_areas": preparation_areas,
+                "context": context,
                 "updated_at": get_now_ist().isoformat(),
             }
             r = self.col.update_one(
@@ -64,26 +55,8 @@ class JobDescriptionService:
             )
             if r.upserted_id:
                 jd_data["created_at"] = get_now_ist().isoformat()
-            logger.info("[JobDescriptionService] ✅ Updated job description")
-            return {
-                "title": title,
-                "description": description,
-                "requirements": requirements,
-                "preparation_areas": preparation_areas,
-            }
+            logger.info("[JobDescriptionService] ✅ Updated job description (context)")
+            return {"context": context}
         except Exception as e:
             logger.error(f"[JobDescriptionService] Failed: {str(e)}", exc_info=True)
             raise AgentError(f"Failed to update job description: {str(e)}", "job_description")
-
-    def _get_default_jd(self) -> Dict[str, Any]:
-        return {
-            "title": "Regional Rural Bank Probationary Officer (PO)",
-            "description": "We are conducting interviews for the Regional Rural Bank Probationary Officer (PO) position. This is an excellent opportunity to build a career in the banking sector and serve rural communities through financial inclusion and banking services.",
-            "requirements": "Graduation degree from a recognized university. Knowledge of local language. Computer literacy.",
-            "preparation_areas": [
-                "Candidate Personal Introduction: Your background, education, and motivation",
-                "Background/History of Regional Rural Bank: Understanding of RRBs, their structure and role",
-                "Current Affairs for Banking: Recent developments in banking sector, RBI policies, government schemes",
-                "Domain Knowledge: Banking fundamentals, operations, and financial awareness",
-            ],
-        }

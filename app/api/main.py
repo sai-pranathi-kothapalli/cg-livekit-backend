@@ -312,17 +312,11 @@ class AdminLoginResponse(BaseModel):
 
 
 class JobDescriptionRequest(BaseModel):
-    title: str
-    description: str
-    requirements: str
-    preparation_areas: List[str]
+    context: str  # Full interview/agent context (admin-editable in Job Description section)
 
 
 class JobDescriptionResponse(BaseModel):
-    title: str
-    description: str
-    requirements: str
-    preparation_areas: List[str]
+    context: str
 
 
 class CandidateRegistrationRequest(BaseModel):
@@ -1499,13 +1493,8 @@ async def update_job_description(jd: JobDescriptionRequest, current_admin: dict 
     try:
         logger.info(f"[API] Updating job description")
         
-        # Save to database
-        updated_jd = jd_service.update_job_description(
-            title=jd.title,
-            description=jd.description,
-            requirements=jd.requirements,
-            preparation_areas=jd.preparation_areas
-        )
+        # Save to database (single context field)
+        updated_jd = jd_service.update_job_description(context=jd.context)
         
         logger.info(f"[API] ✅ Job description saved to database")
         return JobDescriptionResponse(**updated_jd)
