@@ -126,15 +126,13 @@ class Config:
     MAX_APPLICATION_LENGTH: int = 3000  # Characters
     
     # Conversation History Management
-    # Maximum tokens for conversation messages (excluding system instructions)
-    # Reduced to 3000 for safer operation with 8K token models
-    MAX_CONVERSATION_TOKENS: int = int(os.getenv("MAX_CONVERSATION_TOKENS", "3000"))
-    # Maximum number of messages to keep in history
-    # Reduced to 15 to prevent context overflow
-    MAX_CONVERSATION_MESSAGES: int = int(os.getenv("MAX_CONVERSATION_MESSAGES", "15"))
+    # Maximum tokens for conversation messages (excluding system instructions).
+    # Use .env (e.g. 25000) for long interviews; default 12000 avoids aggressive truncation that can make the model "forget" not to conclude.
+    MAX_CONVERSATION_TOKENS: int = int(os.getenv("MAX_CONVERSATION_TOKENS", "12000"))
+    # Maximum number of messages to keep in history. Default 50 so "do not conclude" context is not dropped early.
+    MAX_CONVERSATION_MESSAGES: int = int(os.getenv("MAX_CONVERSATION_MESSAGES", "50"))
     # Minimum messages to always keep (even if over token limit)
-    # Reduced to 4 for more aggressive truncation when needed
-    MIN_CONVERSATION_MESSAGES: int = int(os.getenv("MIN_CONVERSATION_MESSAGES", "4"))
+    MIN_CONVERSATION_MESSAGES: int = int(os.getenv("MIN_CONVERSATION_MESSAGES", "6"))
     
     # Turn Detection
     # Enable ML-based multilingual turn detection (requires model download from HuggingFace).

@@ -14,6 +14,69 @@ from livekit import rtc
 from app.utils.logger import get_logger
 
 
+# Decoder-level: block wrap-up language so model cannot end the interview on its own
+WRAPUP_REPLACEMENT = "Let me ask you one more question."
+WRAPUP_PHRASES = (
+    "thank you for your time",
+    "thanks for your time",
+    "that's all from my side",
+    "that is all from my side",
+    "that's all for today",
+    "that is all for today",
+    "we're done",
+    "we are done",
+    "we are done here",
+    "interview is over",
+    "interview is complete",
+    "that concludes",
+    "wish you all the best",
+    "all the best",
+    "good luck",
+    "best of luck",
+    "you may leave",
+    "you can go now",
+    "that will be all",
+    "no more questions",
+    "that's all the questions",
+    "thank you, that's all",
+)
+
+
+def _contains_wrapup(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    lower = text.lower().strip()
+    return any(phrase in lower for phrase in WRAPUP_PHRASES)
+
+
+def _block_wrapup_at_decoder(text: str) -> str:
+    """Strip wrap-up sentences and replace with a neutral continuation. Used at decoder level."""
+    if not text or not text.strip():
+        return text
+    lower = text.lower()
+    # Find earliest start of any wrap-up phrase
+    earliest = len(text)
+    for phrase in WRAPUP_PHRASES:
+        idx = lower.find(phrase)
+        if idx != -1:
+            # Truncate at sentence boundary before this phrase if possible
+            before = text[:idx]
+            last_period = before.rfind(".")
+            last_newline = before.rfind("\n")
+            cut = max(last_period, last_newline)
+            if cut != -1:
+                idx = cut + 1
+            earliest = min(earliest, idx)
+    if earliest == 0:
+        return WRAPUP_REPLACEMENT
+    if earliest < len(text):
+        out = text[:earliest].rstrip()
+        if not out.endswith(".") and not out.endswith("?"):
+            out += "."
+        return out + " " + WRAPUP_REPLACEMENT
+    return text
+
+
 def _strip_system_context_from_transcript(text: str) -> str:
     """
     Remove echoed time-context / rule text from agent response so it does not
@@ -42,6 +105,9 @@ def _strip_system_context_from_transcript(text: str) -> str:
         "until you receive end_interview",
         "keep asking one question from the question bank",
         "you must not conclude",
+        "you must still ask",
+        "you must not stop",
+        "do not let the model decide to end",
         "say we still have time and ask another question",
         "when time remaining is 2 or less",
         "when time remaining is 5 minutes or less",
@@ -294,6 +360,9 @@ class HistoryManagedContextWrapper:
         self._entered = False
         self._forwarded = False
         self._conversation_id = None
+        # Decoder-level wrap-up block
+        self._wrapup_replacement_yielded = False
+        self._consuming_rest_after_wrapup = False
     
     async def __aenter__(self):
         """Enter the original context manager"""
@@ -302,6 +371,8 @@ class HistoryManagedContextWrapper:
         self._last_sent_text = ""
         self._forwarded = False
         self._conversation_id = id(self)
+        self._wrapup_replacement_yielded = False
+        self._consuming_rest_after_wrapup = False
         
         logger.debug(f"[DEBUG] History-managed wrapper entering (conversation_id: {self._conversation_id})")
         result = await self._cm.__aenter__()
@@ -348,9 +419,28 @@ class HistoryManagedContextWrapper:
         return self
     
     async def __anext__(self):
-        """Iterate and accumulate assistant response with error recovery"""
+        """Iterate and accumulate assistant response with error recovery. Block wrap-up at decoder level."""
         max_retries = 3
         retry_count = 0
+        
+        # If we already detected wrap-up, consume and discard rest of stream, then forward sanitized transcript
+        if self._consuming_rest_after_wrapup:
+            try:
+                while True:
+                    await self._cm.__anext__()
+            except StopAsyncIteration:
+                if self._accumulated_text and not self._forwarded and not self._skip_transcript:
+                    has_unsent = len(self._accumulated_text) > self._last_sent_length
+                    if has_unsent:
+                        try:
+                            to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                            if to_send and to_send != self._last_sent_text:
+                                await self._transcript_service.send_transcript(to_send)
+                            self._last_sent_length = len(self._accumulated_text)
+                        except Exception as e:
+                            logger.error("Failed to send transcript after wrap-up block: %s", e)
+                    self._forwarded = True
+                raise
         
         while retry_count < max_retries:
             try:
@@ -370,6 +460,19 @@ class HistoryManagedContextWrapper:
                 # Accumulate text
                 if chunk_text:
                     self._accumulated_text += chunk_text
+                    
+                    # Decoder-level: block wrap-up language — replace with continuation and consume rest
+                    if _contains_wrapup(self._accumulated_text) and not self._wrapup_replacement_yielded:
+                        self._accumulated_text = _block_wrapup_at_decoder(self._accumulated_text)
+                        self._wrapup_replacement_yielded = True
+                        self._consuming_rest_after_wrapup = True
+                        logger.info("[DECODER] Wrap-up language blocked; replacing with: %s", WRAPUP_REPLACEMENT)
+                        # Yield a chunk that TTS will speak (replacement only)
+                        class _Chunk:
+                            def __init__(self):
+                                self.content = WRAPUP_REPLACEMENT
+                                self.text = WRAPUP_REPLACEMENT
+                        return _Chunk()
                     
                     # Send incremental transcript (skip if flag is set)
                     if not self._skip_transcript:
