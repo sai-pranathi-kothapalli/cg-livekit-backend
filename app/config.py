@@ -133,6 +133,14 @@ class Config:
     MAX_CONVERSATION_MESSAGES: int = int(os.getenv("MAX_CONVERSATION_MESSAGES", "50"))
     # Minimum messages to always keep (even if over token limit)
     MIN_CONVERSATION_MESSAGES: int = int(os.getenv("MIN_CONVERSATION_MESSAGES", "6"))
+    # LLM cost reduction: send only last N messages in full; older history as a summary string
+    RECENT_MESSAGES_TO_KEEP_FULL: int = int(os.getenv("RECENT_MESSAGES_TO_KEEP_FULL", "6"))  # e.g. 6 = last 3 turns
+    MAX_SUMMARY_CHARS: int = int(os.getenv("MAX_SUMMARY_CHARS", "800"))  # max chars for "earlier conversation" summary
+    # Use Gemini to summarize older conversation (True) or truncated concatenation (False)
+    USE_GEMINI_FOR_HISTORY_SUMMARY: bool = os.getenv("USE_GEMINI_FOR_HISTORY_SUMMARY", "false").lower() == "true"
+    
+    # Evaluation: skip Gemini AI analysis for very short interviews (saves cost)
+    MIN_MESSAGES_FOR_AI_EVALUATION: int = int(os.getenv("MIN_MESSAGES_FOR_AI_EVALUATION", "8"))
     
     # Turn Detection
     # Enable ML-based multilingual turn detection (requires model download from HuggingFace).

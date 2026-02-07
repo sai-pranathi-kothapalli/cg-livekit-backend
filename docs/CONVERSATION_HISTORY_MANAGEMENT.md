@@ -38,6 +38,8 @@ Implemented a **sliding window conversation history manager** that:
    - `MAX_CONVERSATION_TOKENS`: Max tokens for conversation (default: 4000)
    - `MAX_CONVERSATION_MESSAGES`: Max messages to keep (default: 20)
    - `MIN_CONVERSATION_MESSAGES`: Minimum messages to always keep (default: 6)
+   - `RECENT_MESSAGES_TO_KEEP_FULL`: Last N messages sent to LLM in full; older history as summary (default: 6 = last 3 turns)
+   - `MAX_SUMMARY_CHARS`: Max characters for the "earlier conversation" summary (default: 800) — reduces LLM cost
 
 ### How It Works
 
@@ -48,6 +50,14 @@ Implemented a **sliding window conversation history manager** that:
    - Token count exceeds `MAX_CONVERSATION_TOKENS`
 4. **Message Passing**: Passes truncated history + system instructions to LLM
 5. **Continuity**: Always keeps at least `MIN_CONVERSATION_MESSAGES` for context
+
+### LLM cost reduction (summary strategy)
+
+When history is longer than `RECENT_MESSAGES_TO_KEEP_FULL`, the manager no longer sends every message in full. Instead it sends:
+- **One system message**: "Summary of earlier conversation: [User]: ... [Assistant]: ..." (truncated to `MAX_SUMMARY_CHARS`)
+- **Last N messages in full**: the most recent turns so the model has exact context
+
+This reduces tokens (and cost) per turn while keeping recent context accurate and older context as a short summary.
 
 ## Configuration
 
@@ -60,6 +70,10 @@ Add these to your `.env` file:
 MAX_CONVERSATION_TOKENS=4000      # Max tokens for conversation (excluding system)
 MAX_CONVERSATION_MESSAGES=20      # Max messages to keep
 MIN_CONVERSATION_MESSAGES=6       # Minimum messages to always keep
+# LLM cost reduction: send last N messages in full; older as a single summary string
+RECENT_MESSAGES_TO_KEEP_FULL=6   # e.g. 6 = last 3 user+assistant turns in full
+MAX_SUMMARY_CHARS=800             # max chars for "earlier conversation" summary (~260 tokens)
+USE_GEMINI_FOR_HISTORY_SUMMARY=false   # set true to use Gemini 1.5 to summarize older messages
 ```
 
 ### Token Budget Breakdown

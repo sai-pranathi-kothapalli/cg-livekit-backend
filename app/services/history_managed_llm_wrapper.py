@@ -128,6 +128,54 @@ def _strip_system_context_from_transcript(text: str) -> str:
 # Thread-local storage to track greeting state
 _thread_local = threading.local()
 
+# Thread-local for token usage logging (set per LLM call, read by timing wrapper when stream ends)
+_token_log_local = threading.local()
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough estimate: ~3 chars per token."""
+    return (len(text or "") // 3)
+
+
+def _chat_ctx_to_input_tokens_estimate(chat_ctx: Any) -> int:
+    """
+    Estimate input tokens from LiveKit ChatContext (when agent passes chat_ctx, not messages).
+    Used so timing wrapper can log total_estimate = input + output.
+    """
+    try:
+        if chat_ctx is None:
+            return 0
+        items = getattr(chat_ctx, "items", None)
+        if not items:
+            return 0
+        total_chars = 0
+        for item in items:
+            x = getattr(item, "item", item)
+            if hasattr(x, "content"):
+                c = x.content
+                if isinstance(c, str):
+                    total_chars += len(c)
+                elif isinstance(c, (list, tuple)):
+                    for part in c:
+                        if hasattr(part, "text"):
+                            total_chars += len(part.text or "")
+                        elif isinstance(part, str):
+                            total_chars += len(part)
+            elif hasattr(x, "text"):
+                total_chars += len(x.text or "")
+        return total_chars // 3 if total_chars else 0
+    except Exception:
+        return 0
+
+
+def _set_last_llm_input_tokens_estimate(estimate: int) -> None:
+    _token_log_local.last_input_tokens_estimate = estimate
+
+
+def get_last_llm_input_tokens_estimate() -> int:
+    """Get last input token estimate (for logging total in timing wrapper)."""
+    return getattr(_token_log_local, "last_input_tokens_estimate", 0)
+
 # Import conversation history manager
 try:
     from app.services.conversation_history_manager import ConversationHistoryManager
@@ -184,7 +232,12 @@ class HistoryManagedLLMWrapper:
         action_type: str = "interview",  # [OK] NEW: Action type
         max_conversation_tokens: int = 4000,
         max_messages: int = 20,
-        min_messages_to_keep: int = 6
+        min_messages_to_keep: int = 6,
+        recent_messages_to_keep_full: int = 6,
+        max_summary_chars: int = 800,
+        use_gemini_for_summary: bool = False,
+        gemini_api_key: Optional[str] = None,
+        gemini_model: str = "gemini-1.5-flash",
     ):
         """
         Initialize history-managed LLM wrapper.
@@ -197,6 +250,11 @@ class HistoryManagedLLMWrapper:
             max_conversation_tokens: Max tokens for conversation (excluding system)
             max_messages: Maximum messages to keep
             min_messages_to_keep: Minimum messages to always keep
+            recent_messages_to_keep_full: Last N messages sent in full; older as summary (reduces LLM cost)
+            max_summary_chars: Max characters for the "earlier conversation" summary string
+            use_gemini_for_summary: If True, use Gemini 1.5 to summarize older messages
+            gemini_api_key: Google API key for Gemini summarization
+            gemini_model: Model for summarization (e.g. gemini-1.5-flash)
         """
         self._original_chat = original_chat
         self._transcript_service = transcript_service
@@ -207,13 +265,18 @@ class HistoryManagedLLMWrapper:
         
         self._session_id = session_id
         
-        # [OK] FIXED: Pass session_id to ConversationHistoryManager
+        # [OK] FIXED: Pass session_id and cost-reduction params to ConversationHistoryManager
         self._history_manager = ConversationHistoryManager(
             session_id=session_id,
             action_type=action_type,
             max_conversation_tokens=max_conversation_tokens,
             max_messages=max_messages,
-            min_messages_to_keep=min_messages_to_keep
+            min_messages_to_keep=min_messages_to_keep,
+            recent_messages_to_keep_full=recent_messages_to_keep_full,
+            max_summary_chars=max_summary_chars,
+            use_gemini_for_summary=use_gemini_for_summary,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
         )
         logger.info(f"HistoryManagedLLMWrapper initialized for session {session_id}")
     
@@ -224,6 +287,7 @@ class HistoryManagedLLMWrapper:
         Intercepts messages parameter to manage history before
         passing to original LLM chat.
         """
+        _set_last_llm_input_tokens_estimate(0)  # reset so timing wrapper doesn't use stale value
         # Extract messages from kwargs or args
         messages = kwargs.get('messages', None)
         if messages is None and len(args) > 0:
@@ -249,11 +313,10 @@ class HistoryManagedLLMWrapper:
                         # Track conversation messages
                         incoming_conversation.append((role, content))
             
-            # Sync history with incoming messages
+            # Sync history with incoming messages (use full list for sync, not summary+recent)
             # Strategy: Intelligently merge new messages instead of clearing/rebuilding
-            # This prevents unnecessary operations and ensures proper truncation
             if incoming_conversation:
-                current_history = self._history_manager.get_messages_for_llm()
+                current_history = self._history_manager.get_full_message_list_for_sync()
                 current_content = [(msg['role'], msg['content']) for msg in current_history]
                 
                 # Check if incoming has fewer messages (Agent truncated) - rebuild to stay in sync
@@ -302,12 +365,30 @@ class HistoryManagedLLMWrapper:
                 # Replace first arg
                 args = (managed_messages,) + args[1:]
             
+            # Estimate input/context tokens for logging (and for timing wrapper to log total)
+            input_tokens_estimate = sum(
+                _estimate_tokens(m.get("content", "")) for m in managed_messages
+            )
+            _set_last_llm_input_tokens_estimate(input_tokens_estimate)
+            logger.info(
+                f"📊 [TOKENS] input_estimate={input_tokens_estimate} context_estimate={input_tokens_estimate} "
+                f"(messages={len(managed_messages)}, history managed: {len(incoming_conversation)}→{len(managed_conversation)})"
+            )
             logger.info(
                 f"📊 History managed: {len(incoming_conversation)} incoming → "
                 f"{len(managed_conversation)} managed messages "
                 f"({self._history_manager.get_total_tokens()} tokens), "
                 f"{len(system_messages)} system messages"
             )
+        else:
+            # Agent passed chat_ctx (LiveKit) instead of messages — still set input estimate for token logging
+            chat_ctx = kwargs.get("chat_ctx")
+            if chat_ctx is not None:
+                input_tokens_estimate = _chat_ctx_to_input_tokens_estimate(chat_ctx)
+                _set_last_llm_input_tokens_estimate(input_tokens_estimate)
+                logger.info(
+                    f"📊 [TOKENS] input_estimate={input_tokens_estimate} (from chat_ctx, no message list)"
+                )
         
         # Get original context manager with error handling
         try:

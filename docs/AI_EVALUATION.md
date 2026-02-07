@@ -53,9 +53,18 @@ XAI_API_KEY=your_api_key_here
 GROK_MODEL=grok-2-1212
 ```
 
+### Skip AI for very short interviews (cost optimization)
+
+The system uses **Gemini** for AI evaluation. To save cost, Gemini is **not** called when the transcript has fewer than **8 messages** (configurable). For those short sessions, only fallback evaluation is used (basic metrics and generic feedback).
+
+```bash
+# Minimum transcript messages before calling Gemini for evaluation (default: 8)
+MIN_MESSAGES_FOR_AI_EVALUATION=8
+```
+
 ### Fallback Mode
 
-If Grok is not available or fails:
+If Gemini is not available or fails:
 - System automatically falls back to basic evaluation
 - Still calculates metrics (duration, questions, rounds)
 - Uses generic but helpful feedback

@@ -253,6 +253,19 @@ class EvaluationService:
                 response.raise_for_status()
                 data = response.json()
             
+            # Log token usage (Gemini returns usageMetadata)
+            usage = data.get("usageMetadata") or {}
+            input_tokens = usage.get("promptTokenCount") or usage.get("prompt_token_count")
+            output_tokens = usage.get("candidatesTokenCount") or usage.get("candidates_token_count")
+            total_tokens = usage.get("totalTokenCount") or usage.get("total_token_count")
+            if input_tokens is not None or output_tokens is not None or total_tokens is not None:
+                logger.info(
+                    "📊 [EVAL TOKENS] input=%s output=%s total=%s (context=input)",
+                    input_tokens or "—",
+                    output_tokens or "—",
+                    total_tokens or "—",
+                )
+            
             content = None
             if "candidates" in data and len(data["candidates"]) > 0:
                 cand = data["candidates"][0]
@@ -388,9 +401,10 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                 except Exception as e:
                     logger.debug(f"[EvaluationService] Could not compute duration from transcript timestamps: {e}")
             
-            # Try AI-powered analysis
+            # Try AI-powered analysis (skip Gemini for short interviews to save cost)
             ai_analysis = None
-            if transcript and len(transcript) > 2:  # Only analyze if there's actual conversation
+            min_for_ai = getattr(self.config, "MIN_MESSAGES_FOR_AI_EVALUATION", 8)
+            if transcript and len(transcript) >= min_for_ai:
                 try:
                     # Run async analysis - handle both sync and async contexts
                     try:
@@ -425,6 +439,11 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                         )
                 except Exception as e:
                     logger.warning(f"AI analysis failed: {e}, using fallback", exc_info=True)
+            elif transcript and len(transcript) < min_for_ai:
+                logger.info(
+                    f"⏭️  Skipping Gemini evaluation (interview has {len(transcript)} messages, "
+                    f"min for AI evaluation is {min_for_ai}) — using fallback only"
+                )
             
             # Extract data from AI analysis or use fallback
             communication_quality = None
