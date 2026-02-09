@@ -246,6 +246,7 @@ class BookingResponse(BaseModel):
     application_text: Optional[str] = None
     application_url: Optional[str] = None
     application_form_submitted: Optional[bool] = None  # True/False when booking has user_id; must be True to attend
+    token_usage: Optional[Dict[str, int]] = None
 
 
 class PaginatedCandidatesResponse(BaseModel):
@@ -283,8 +284,9 @@ class EvaluationResponse(BaseModel):
     # Gemini analysis criteria (0-10 each) and overall feedback paragraph
     communication_quality: Optional[float] = None
     technical_knowledge: Optional[float] = None
-    problem_solving: Optional[float] = None
-    overall_feedback: Optional[str] = None
+    problem_solving: Optional[float] = None,
+    overall_feedback: Optional[str] = None,
+    token_usage: Optional[Dict[str, int]] = None,
 
 
 class ConnectionDetailsRequest(BaseModel):
@@ -1029,6 +1031,7 @@ async def get_evaluation(token: str):
             technical_knowledge=evaluation.get("technical_knowledge") if evaluation else None,
             problem_solving=evaluation.get("problem_solving") if evaluation else None,
             overall_feedback=evaluation.get("overall_feedback") if evaluation else None,
+            token_usage=evaluation.get("token_usage") if evaluation else None,
         )
         
     except HTTPException:
@@ -1710,6 +1713,58 @@ async def bulk_register(
         )
 
 
+@app.get("/api/admin/gemini-usage", response_model=List[BookingResponse])
+async def get_gemini_usage_report(
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Get all interviews with token usage for reporting.
+    """
+    try:
+        # Fetch all bookings with evaluation data (for token_usage)
+        pipeline = [
+            {"$sort": {"created_at": -1}},
+            {
+                "$lookup": {
+                    "from": "interview_evaluations",
+                    "localField": "token",
+                    "foreignField": "booking_token",
+                    "as": "evaluation"
+                }
+            },
+            {
+                "$addFields": {
+                    "token_usage": {"$arrayElemAt": ["$evaluation.token_usage", 0]}
+                }
+            }
+        ]
+        cursor = booking_service.col.aggregate(pipeline)
+        
+        candidates = []
+        for doc in cursor:
+            booking = booking_service._doc_to_booking(doc)
+            if booking:
+                candidates.append(BookingResponse(
+                    token=booking.get('token', ''),
+                    name=booking.get('name', ''),
+                    email=booking.get('email', ''),
+                    phone=booking.get('phone', ''),
+                    scheduled_at=booking.get('scheduled_at', ''),
+                    created_at=booking.get('created_at', ''),
+                    application_text=booking.get('application_text'),
+                    application_url=booking.get('application_url'),
+                    token_usage=doc.get('token_usage'),
+                ))
+        
+        return candidates
+    except Exception as e:
+        logger.error(f"[API] Error fetching usage report: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 @app.get("/api/admin/candidates", response_model=PaginatedCandidatesResponse)
 async def get_all_candidates(
     current_admin: dict = Depends(get_current_admin),
@@ -1763,8 +1818,27 @@ async def get_all_candidates(
         total_pages = max(1, (total + page_size - 1) // page_size)
         skip = (page - 1) * page_size
         
-        # Fetch paginated results
-        cursor = booking_service.col.find(query_filter).sort(sort_by, sort_direction).skip(skip).limit(page_size)
+        # Fetch paginated results with evaluation data (for token_usage)
+        pipeline = [
+            {"$match": query_filter},
+            {"$sort": {sort_by: sort_direction}},
+            {"$skip": skip},
+            {"$limit": page_size},
+            {
+                "$lookup": {
+                    "from": "interview_evaluations",
+                    "localField": "token",
+                    "foreignField": "booking_token",
+                    "as": "evaluation"
+                }
+            },
+            {
+                "$addFields": {
+                    "token_usage": {"$arrayElemAt": ["$evaluation.token_usage", 0]}
+                }
+            }
+        ]
+        cursor = booking_service.col.aggregate(pipeline)
         
         # Convert to BookingResponse format
         candidates = []
@@ -1780,6 +1854,7 @@ async def get_all_candidates(
                     created_at=booking.get('created_at', ''),
                     application_text=booking.get('application_text'),
                     application_url=booking.get('application_url'),
+                    token_usage=doc.get('token_usage'),
                 ))
         
         logger.info(f"[API] ✅ Returning {len(candidates)} candidates (page {page}/{total_pages}, total {total})")

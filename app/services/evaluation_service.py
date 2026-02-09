@@ -53,6 +53,7 @@ class EvaluationService:
         technical_knowledge: Optional[float] = None,
         problem_solving: Optional[float] = None,
         overall_feedback: Optional[str] = None,
+        token_usage: Optional[Dict[str, int]] = None,
     ) -> Optional[str]:
         """
         Create or update an evaluation record.
@@ -76,6 +77,7 @@ class EvaluationService:
                 "technical_knowledge": float(technical_knowledge) if technical_knowledge is not None else None,
                 "problem_solving": float(problem_solving) if problem_solving is not None else None,
                 "overall_feedback": overall_feedback,
+                "token_usage": token_usage,
                 "evaluated_at": get_now_ist().isoformat(),
             }
             
@@ -162,6 +164,23 @@ class EvaluationService:
             logger.error(f"❌ Error saving round evaluation: {e}", exc_info=True)
             return False
     
+    async def update_token_usage(self, booking_token: str, token_usage: Dict[str, int]) -> bool:
+        """
+        Update token usage for a booking.
+        """
+        try:
+            result = self.evals.update_one(
+                {"booking_token": booking_token},
+                {"$set": {"token_usage": token_usage}}
+            )
+            if result.modified_count > 0:
+                logger.info(f"✅ Updated token usage for booking {booking_token}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error updating token usage: {e}", exc_info=True)
+            return False
+
     def get_evaluation(self, booking_token: str) -> Optional[Dict[str, Any]]:
         """
         Get evaluation data for a booking.
@@ -375,6 +394,7 @@ Be specific and constructive. Base scores on actual performance in the transcrip
         room_name: str,
         transcript: List[Dict[str, Any]],
         interview_state: Optional[Dict[str, Any]] = None,
+        token_usage: Optional[Dict[str, int]] = None,
     ) -> Optional[str]:
         """
         Calculate evaluation metrics from transcript and interview state.
@@ -514,6 +534,7 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                 technical_knowledge=technical_knowledge,
                 problem_solving=problem_solving,
                 overall_feedback=overall_feedback,
+                token_usage=token_usage,
             )
             # Do not call save_round_evaluation here — create_evaluation already writes rounds from rounds_data.
             return evaluation_id
