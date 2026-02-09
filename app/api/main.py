@@ -1491,12 +1491,13 @@ async def update_job_description(jd: JobDescriptionRequest, current_admin: dict 
     Requires admin authentication.
     """
     try:
-        logger.info(f"[API] Updating job description")
+        ctx_len = len(jd.context or "")
+        logger.info(f"[API] Updating job description (received context length={ctx_len})")
         
         # Save to database (single context field)
         updated_jd = jd_service.update_job_description(context=jd.context)
         
-        logger.info(f"[API] ✅ Job description saved to database")
+        logger.info(f"[API] ✅ Job description saved to database (db={jd_service.db.name})")
         return JobDescriptionResponse(**updated_jd)
     except Exception as e:
         logger.error(f"[API] Error updating job description: {str(e)}", exc_info=True)
