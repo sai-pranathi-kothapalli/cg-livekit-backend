@@ -181,6 +181,27 @@ class EvaluationService:
             logger.error(f"❌ Error updating token usage: {e}", exc_info=True)
             return False
 
+    async def get_evaluation_by_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """
+        Get evaluation data for a specific booking token.
+        """
+        return self.evals.find_one({"booking_token": token})
+
+    def get_evaluations_for_bookings(self, booking_tokens: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get evaluations for a list of booking tokens.
+        """
+        try:
+            if not booking_tokens:
+                return []
+            
+            # Find evaluations where booking_token is in the list
+            evaluations = list(self.evals.find({"booking_token": {"$in": booking_tokens}}))
+            return evaluations
+        except Exception as e:
+            logger.error(f"Error fetching evaluations for bookings: {e}")
+            return []
+
     def get_evaluation(self, booking_token: str) -> Optional[Dict[str, Any]]:
         """
         Get evaluation data for a booking.
@@ -421,6 +442,48 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                 except Exception as e:
                     logger.debug(f"[EvaluationService] Could not compute duration from transcript timestamps: {e}")
             
+            # Extract rounds data from interview state if available
+            if interview_state and 'response_ratings' in interview_state:
+                for round_name, ratings in interview_state.get('response_ratings', {}).items():
+                    if ratings:
+                        avg_rating = sum(ratings) / len(ratings)
+                        rounds_analysis.append({
+                            "round_name": round_name,
+                            "average_rating": avg_rating,
+                            "questions_count": len(ratings),
+                        })
+            
+            # 1. IMMEDIATE SAVE: Save basic evaluation with token usage to prevent data loss on timeout
+            # Use basic metrics for now
+            basic_rounds_data = []
+            for ra in rounds_analysis:
+                basic_rounds_data.append({
+                    "round_name": ra.get("round_name", ""),
+                    "average_rating": ra.get("average_rating", 0),
+                    "questions_count": ra.get("questions_count", 0),
+                    "performance_summary": "Pending AI analysis...",
+                    "topics_covered": [],
+                })
+                
+            logger.info(f"💾 Saving PRELIMINARY evaluation with token_usage={token_usage}")
+            evaluation_id = self.create_evaluation(
+                booking_token=booking_token,
+                room_name=room_name,
+                duration_minutes=duration_minutes,
+                total_questions=total_questions,
+                rounds_completed=rounds_completed,
+                overall_score=None, # Pending
+                rounds_data=basic_rounds_data,
+                strengths=[],
+                areas_for_improvement=[],
+                interview_state=interview_state,
+                communication_quality=None,
+                technical_knowledge=None,
+                problem_solving=None,
+                overall_feedback="AI analysis in progress...",
+                token_usage=token_usage, # <--- IMPORTANT: usage saved here
+            )
+
             # Try AI-powered analysis (skip Gemini for short interviews to save cost)
             ai_analysis = None
             min_for_ai = getattr(self.config, "MIN_MESSAGES_FOR_AI_EVALUATION", 8)
@@ -481,7 +544,9 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                 overall_feedback = ai_analysis.get('overall_feedback')
                 logger.info(f"✅ Using AI-generated evaluation (score: {overall_score})")
             else:
-                # Fallback to basic evaluation
+                # Fallback to basic evaluation (only if AI completely failed or skipped)
+                # If we already had basic rounds_analysis from interview_state, we keep it or enhance it
+                # Logic here basically keeps fallback values if ai_analysis is None
                 overall_score = 7.0
                 strengths = [
                     "Completed all interview rounds",
@@ -492,22 +557,24 @@ Be specific and constructive. Base scores on actual performance in the transcrip
                     "Consider providing more detailed examples in responses",
                     "Practice articulating technical concepts more clearly",
                 ]
-                rounds_analysis = []
                 
-                # Extract rounds data from interview state if available
-                if interview_state and 'response_ratings' in interview_state:
-                    for round_name, ratings in interview_state.get('response_ratings', {}).items():
-                        if ratings:
-                            avg_rating = sum(ratings) / len(ratings)
-                            rounds_analysis.append({
-                                "round_name": round_name,
-                                "average_rating": avg_rating,
-                                "questions_count": len(ratings),
-                            })
+                # If we didn't have AI analysis, we reuse the basic rounds analysis we already extracted
+                # (but we might need to re-extract if we want to ensure variables are set correctly for the final save)
+                if not rounds_analysis:
+                     # Re-extract
+                    if interview_state and 'response_ratings' in interview_state:
+                         for round_name, ratings in interview_state.get('response_ratings', {}).items():
+                             if ratings:
+                                 avg_rating = sum(ratings) / len(ratings)
+                                 rounds_analysis.append({
+                                     "round_name": round_name,
+                                     "average_rating": avg_rating,
+                                     "questions_count": len(ratings),
+                                 })
                 
                 logger.info("Using fallback evaluation (AI analysis not available)")
             
-            # Format rounds_data for storage
+            # Format rounds_data for storage (FINAL)
             rounds_data = []
             for round_analysis in rounds_analysis:
                 rounds_data.append({

@@ -98,15 +98,19 @@ class BookingService:
     def get_all_bookings(self) -> List[Dict[str, Any]]:
         """Fetch all bookings from MongoDB."""
         try:
-            cursor = self.col.find({})
-            out = []
-            for doc in cursor:
-                booking = self._doc_to_booking(doc)
-                if booking:
-                    out.append(booking)
-            return out
+            bookings = list(self.col.find({}).sort("created_at", -1))
+            return [self._doc_to_booking(b) for b in bookings]
         except Exception as e:
             logger.error(f"Error fetching all bookings: {e}")
+            return []
+
+    def get_user_bookings(self, user_id: str) -> List[Dict[str, Any]]:
+        """Fetch all bookings for a specific user from MongoDB."""
+        try:
+            bookings = list(self.col.find({"user_id": user_id}).sort("scheduled_at", -1))
+            return [self._doc_to_booking(b) for b in bookings if b]
+        except Exception as e:
+            logger.error(f"Error fetching user bookings for {user_id}: {e}")
             return []
 
     def update_booking_status(self, token: str, status: str) -> bool:

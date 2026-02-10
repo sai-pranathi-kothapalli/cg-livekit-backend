@@ -6,12 +6,15 @@ Wraps LLM chat to manage conversation history with intelligent truncation.
 
 import asyncio
 import re
+import contextvars
 import threading
 import uuid
 from typing import Any, Callable, AsyncContextManager, List, Dict, Optional
 from livekit import rtc
 
 from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # Decoder-level: block wrap-up language so model cannot end the interview on its own
@@ -125,11 +128,17 @@ def _strip_system_context_from_transcript(text: str) -> str:
     text = "\n".join(filtered)
     return text.strip()
 
-# Thread-local storage to track greeting state
-_thread_local = threading.local()
+# Context-local storage to track greeting state and token usage (asyncio safe)
+_skip_transcript_var = contextvars.ContextVar("skip_transcript", default=False)
+_last_input_tokens_estimate_var = contextvars.ContextVar("last_input_tokens_estimate", default=0)
 
-# Thread-local for token usage logging (set per LLM call, read by timing wrapper when stream ends)
-_token_log_local = threading.local()
+
+def set_skip_transcript(value: bool):
+    _skip_transcript_var.set(value)
+
+
+def get_skip_transcript() -> bool:
+    return _skip_transcript_var.get()
 
 
 def _estimate_tokens(text: str) -> int:
@@ -169,12 +178,12 @@ def _chat_ctx_to_input_tokens_estimate(chat_ctx: Any) -> int:
 
 
 def _set_last_llm_input_tokens_estimate(estimate: int) -> None:
-    _token_log_local.last_input_tokens_estimate = estimate
+    _last_input_tokens_estimate_var.set(estimate)
 
 
 def get_last_llm_input_tokens_estimate() -> int:
     """Get last input token estimate (for logging total in timing wrapper)."""
-    return getattr(_token_log_local, "last_input_tokens_estimate", 0)
+    return _last_input_tokens_estimate_var.get()
 
 # Import conversation history manager
 try:
@@ -202,18 +211,6 @@ except ImportError:
                 self._messages = []
             def get_total_tokens(self):
                 return sum(len(msg.get("content", "")) // 3 for msg in self._messages)
-
-logger = get_logger(__name__)
-
-
-def set_skip_transcript(value: bool):
-    """Set flag to skip transcript sending (e.g., for greeting)"""
-    _thread_local.skip_transcript = value
-
-
-def get_skip_transcript() -> bool:
-    """Get flag to skip transcript sending"""
-    return getattr(_thread_local, 'skip_transcript', False)
 
 
 class HistoryManagedLLMWrapper:

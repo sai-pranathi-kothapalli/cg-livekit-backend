@@ -185,6 +185,151 @@ class ResumeService:
             logger.error(f"[ResumeService] {error_msg}", exc_info=True)
             return "", error_msg
     
+    def _normalize_spacing(self, text: str) -> str:
+        """
+        Fix spacing issues from PyPDF2 (e.g., 'Sc ale-I' -> 'Scale-I', 'HUSS AIN' -> 'HUSSAIN').
+        """
+        if not text:
+            return text
+        
+        # Remove spaces within words (common PyPDF2 artifact)
+        # Pattern: letter + space + lowercase letter (e.g., "Sc ale" -> "Scale")
+        text = re.sub(r'([a-z])\s+([a-z])', r'\1\2', text, flags=re.IGNORECASE)
+        
+        # Remove spaces within uppercase words (e.g., "HUSS AIN" -> "HUSSAIN")
+        text = re.sub(r'([A-Z])\s+([A-Z])', r'\1\2', text)
+        
+        # Remove spaces around hyphens (e.g., "Scale- I" -> "Scale-I")
+        text = re.sub(r'\s*-\s*', '-', text)
+        
+        # Clean up multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text.strip()
+    
+    def _clean_extracted_value(self, value: str) -> str:
+        """
+        Clean up extracted value by removing common label contamination and artifacts.
+        """
+        if not value:
+            return value
+        
+        # Remove common label patterns that got captured
+        # Pattern: "Card Number :XXXXXXXX" -> "XXXXXXXX"
+        value = re.sub(r'^.*?(?:Card\s+Number|Number)\s*:?\s*', '', value, flags=re.IGNORECASE)
+        
+        # Remove trailing label patterns (e.g., "'s Name :" at end)
+        value = re.sub(r"'s\s+Name\s*:?\s*$", '', value, flags=re.IGNORECASE)
+        
+        # Remove question-like patterns (more aggressive)
+        value = re.sub(r'\s*-?\s*ho?w?\s+y?ou\s+w?ould.*$', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\s*-?\s*of\s*P?\s*aper.*$', '', value, flags=re.IGNORECASE)
+        value = re.sub(r't?\s*o\s+which\s+y?\s*ou\s+belong\s*:?', '', value, flags=re.IGNORECASE)
+        
+        # Remove common incomplete fragments (only if they're the ENTIRE value)
+        if re.match(r'^(ress|s \(CRP)$', value, flags=re.IGNORECASE):
+            return ''
+        
+        # Fix "Bachelorof" -> "Bachelor of" spacing (but don't remove if it's the whole value)
+        value = re.sub(r'(Bachelor|Master|Diploma)(of)', r'\1 \2', value, flags=re.IGNORECASE)
+        
+        # Remove "code :" prefix from pincodes
+        value = re.sub(r'^code\s*:?\s*', '', value, flags=re.IGNORECASE)
+        
+        # Remove leading/trailing colons, dashes, and extra punctuation
+        value = value.strip(':- .')
+        
+        # Normalize spacing
+        value = self._normalize_spacing(value)
+        
+        # Remove any remaining single letters or very short fragments at start
+        value = re.sub(r'^[a-z]\s+', '', value, flags=re.IGNORECASE)
+        
+        return value.strip()
+    
+    def _extract_phone_number(self, text: str) -> Optional[str]:
+        """
+        Extract phone number from text, handling various formats and spacing issues.
+        """
+        # Look for patterns like "91 630290 7829" or "9163029078 29" or "9163029078" 
+        # Remove all spaces first, then extract 10-12 digit numbers
+        text_no_spaces = re.sub(r'\s+', '', text)
+        
+        # Pattern: optional +91 or 91, followed by 10 digits
+        phone_match = re.search(r'(?:\+?91)?([6-9]\d{9})', text_no_spaces)
+        if phone_match:
+            return phone_match.group(1)  # Return just the 10-digit number
+        
+        return None
+    
+    def _extract_date(self, text: str) -> Optional[str]:
+        """
+        Extract date from text and normalize to YYYY-MM-DD format.
+        """
+        # Remove spacing issues first
+        text = self._normalize_spacing(text)
+        
+        # Skip if text is just a slash or very short
+        if not text or len(text.strip()) <= 1 or text.strip() == '/':
+            return None
+        
+        # Try various date patterns
+        patterns = [
+            r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})',  # DD/MM/YYYY or DD-MM-YYYY
+            r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
+            r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})',  # DD Month YYYY
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                parts = match.groups()
+                
+                # Handle month name format
+                if len(parts) == 3 and not parts[1].isdigit():
+                    day, month_name, year = parts
+                    month_map = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                                'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+                    month = month_map.get(month_name[:3].lower(), 0)
+                    if month == 0:
+                        continue
+                    day = int(day)
+                    year = int(year)
+                # Try to determine format and convert to YYYY-MM-DD
+                elif len(parts[0]) == 4:  # YYYY-MM-DD format
+                    year, month, day = parts
+                    day = int(day)
+                    month = int(month)
+                    year = int(year)
+                else:  # DD-MM-YYYY format (common in India)
+                    day, month, year = parts
+                    day = int(day)
+                    month = int(month)
+                    year = int(year)
+                
+                try:
+                    # Validate and format
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        return f"{year:04d}-{month:02d}-{day:02d}"
+                except (ValueError, UnboundLocalError):
+                    continue
+        
+        return None
+    
+    def _extract_aadhaar(self, text: str) -> Optional[str]:
+        """
+        Extract Aadhaar number and remove spacing issues.
+        """
+        # Remove all spaces first
+        text_no_spaces = re.sub(r'\s+', '', text)
+        
+        # Look for 12-digit Aadhaar (may be masked with X's)
+        aadhaar_match = re.search(r'([X\d]{12})', text_no_spaces, flags=re.IGNORECASE)
+        if aadhaar_match:
+            return aadhaar_match.group(1)
+        
+        return None
+
     def _extract_label_value(self, text: str, labels: Tuple[str, ...]) -> Optional[str]:
         """Extract value after any of the given labels. Stops at newline or next form-field label so each field gets only its value."""
         # Build lookahead: stop at newline or any "next field" label (so we don't merge into one field)
@@ -199,7 +344,9 @@ class ResumeService:
             m = pat.search(text)
             if m:
                 val = m.group(1).strip().strip("-").strip()
-                if val and val.lower() not in ("-", "na", "n/a", "nil", "—", "–"):
+                # Clean the extracted value
+                val = self._clean_extracted_value(val)
+                if val and val.lower() not in ("-", "na", "n/a", "nil", "—", "–", ":"):
                     return val
             # Fallback: same line only (for PDFs with newlines between fields)
             pat_line = re.compile(re.escape(label) + r"\s*:?\s*([^\n]+)", re.IGNORECASE)
@@ -212,7 +359,9 @@ class ResumeService:
                         idx = val.lower().find(stop.lower())
                         val = val[:idx].strip().strip("-").strip()
                         break
-                if val and val.lower() not in ("-", "na", "n/a", "nil", "—", "–"):
+                # Clean the extracted value
+                val = self._clean_extracted_value(val)
+                if val and val.lower() not in ("-", "na", "n/a", "nil", "—", "–", ":"):
                     return val
         return None
 
@@ -262,13 +411,15 @@ class ResumeService:
 
     async def parse_application_data(self, text: str) -> Dict[str, Any]:
         """
-        Parse extracted text into structured application data using regex/heuristics only.
+        Parse extracted text into structured application data using regex/heuristics.
         Chunks text by section first, then extracts each field from the relevant section.
-        No external API keys. Suited for IBPS RRB / CRP-style forms.
         """
         if not text or len(text.strip()) < 10:
             return {}
+        
+        # Clean but preserve newlines for better structure
         text_clean = self._clean_text(text)
+        logger.info("[ResumeService] Using regex-based parsing")
         chunks = self._chunk_by_sections(text_clean)
         # Resolve which text to use per field (section chunk or full-text fallback)
         personal = chunks.get("personal", text_clean)
@@ -305,7 +456,9 @@ class ResumeService:
             ("Date of Birth", "DOB", "D.O.B", "Birth Date"),
         )
         if dob_raw:
-            out["date_of_birth"] = self._normalize_date(dob_raw) or dob_raw
+            # Use specialized date extractor
+            extracted_date = self._extract_date(dob_raw)
+            out["date_of_birth"] = extracted_date if extracted_date else dob_raw
 
         gender = self._extract_label_value(
             personal,
@@ -326,7 +479,9 @@ class ResumeService:
             ("Aadhaar", "Aadhaar Card Number", "Aadhar", "UID"),
         )
         if aadhaar:
-            out["aadhaar_number"] = aadhaar.strip()
+            # Use specialized Aadhaar extractor to remove spacing
+            extracted_aadhaar = self._extract_aadhaar(aadhaar)
+            out["aadhaar_number"] = extracted_aadhaar if extracted_aadhaar else aadhaar.strip()
 
         pan = self._extract_label_value(
             personal,
@@ -367,14 +522,17 @@ class ResumeService:
             if v:
                 out[key] = v
 
-        # Permanent address – from permanent section
+        # Permanent address – from permanent section or full text fallback
         for key, labels in (
-            ("permanent_address1", ("Permanent Address", "Permanent Add", "Address Line 1")),
-            ("permanent_state", ("Permanent State", "Permanent State")),
-            ("permanent_district", ("Permanent District", "Permanent District")),
-            ("permanent_pincode", ("Permanent Pincode", "Permanent Pin")),
+            ("permanent_address1", ("Permanent Address", "Permanent Add", "Address Line 1", "Permanent Addr", "P Address")),
+            ("permanent_state", ("Permanent State", "State")),
+            ("permanent_district", ("Permanent District", "District")),
+            ("permanent_pincode", ("Permanent Pincode", "Permanent Pin", "Pin")),
         ):
             v = self._extract_label_value(perm_addr, labels)
+            # Fallback to full text if not found in section
+            if not v:
+                v = self._extract_label_value(text_clean, labels)
             if v:
                 out[key] = v
 
@@ -389,20 +547,22 @@ class ResumeService:
                 ("Mobile", "Mobile Number", "Phone", "Contact Number", "Mobile No"),
             )
         if mobile:
-            out["mobile_number"] = mobile.strip()
+            # Use specialized phone extractor to clean up spacing
+            extracted_phone = self._extract_phone_number(mobile)
+            out["mobile_number"] = extracted_phone if extracted_phone else mobile.strip()
 
         # Education – from education section only
         for key, labels in (
-            ("ssc_board", ("SSC Board", "10th Board", "Board (SSC)")),
-            ("ssc_passing_date", ("SSC Passing", "SSC Year", "10th Passing")),
-            ("ssc_percentage", ("SSC Percentage", "SSC %", "10th Percentage")),
-            ("ssc_class", ("SSC Class", "10th Class")),
-            ("graduation_degree", ("Graduation Degree", "Degree", "Graduate Degree")),
-            ("graduation_college", ("Graduation College", "College", "Graduate College")),
-            ("graduation_specialization", ("Specialization", "Graduation Specialization")),
-            ("graduation_passing_date", ("Graduation Passing", "Graduation Year")),
-            ("graduation_percentage", ("Graduation Percentage", "Graduation %")),
-            ("graduation_class", ("Graduation Class", "Graduate Class")),
+            ("ssc_board", ("SSC Board", "10th Board", "Board (SSC)", "Board")),
+            ("ssc_passing_date", ("SSC Passing", "SSC Year", "10th Passing", "SSC Passing Year")),
+            ("ssc_percentage", ("SSC Percentage", "SSC %", "10th Percentage", "SSC Marks")),
+            ("ssc_class", ("SSC Class", "10th Class", "SSC Division")),
+            ("graduation_degree", ("Graduation Degree", "Degree", "Graduate Degree", "Qualification", "Educational Qualification")),
+            ("graduation_college", ("Graduation College", "College", "Graduate College", "College Name", "University")),
+            ("graduation_specialization", ("Specialization", "Graduation Specialization", "Stream", "Subject")),
+            ("graduation_passing_date", ("Graduation Passing", "Graduation Year", "Passing Year")),
+            ("graduation_percentage", ("Graduation Percentage", "Graduation %", "Graduation Marks")),
+            ("graduation_class", ("Graduation Class", "Graduate Class", "Division")),
         ):
             v = self._extract_label_value(education, labels)
             if v:
@@ -454,14 +614,41 @@ class ResumeService:
         logger.info(f"[ResumeService] Parsed {len(out)} fields from PDF (chunk-by-section, no API)")
         return out
 
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize extracted text"""
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text)
-        # Normalize line breaks
-        text = re.sub(r'\n\s*\n', '\n', text)
-        # Trim
-        text = text.strip()
+    def save_extracted_data_to_json(self, data: Dict[str, Any], original_filename: str) -> str:
+        """
+        Save extracted data to a JSON file in the extracted_pdfs folder.
+        Returns the absolute path to the saved file.
+        """
+        import json
+        import os
+        from pathlib import Path
+        from datetime import datetime
         
-        return text
+        # Create extracted_pdfs directory if it doesn't exist
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+        output_dir = backend_dir / "extracted_pdfs"
+        output_dir.mkdir(exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = Path(original_filename).stem
+        json_filename = f"{timestamp}_{base_name}.json"
+        json_path = output_dir / json_filename
+        
+        # Save JSON file
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"[ResumeService] 💾 Saved extracted data to: {json_path}")
+        return str(json_path)
+
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize extracted text while preserving structure"""
+        # Remove null characters
+        text = text.replace('\0', '')
+        # Normalize multiple spaces to single but keep newlines
+        text = re.sub(r'[ \t]+', ' ', text)
+        # Normalize excessive newlines
+        text = re.sub(r'\n\s*\n+', '\n\n', text)
+        return text.strip()
 

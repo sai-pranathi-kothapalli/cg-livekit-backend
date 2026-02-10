@@ -2031,6 +2031,20 @@ class UserResponse(BaseModel):
     temporary_password: Optional[str] = None  # Temporary password (for testing - remove in production)
 
 
+class InterviewSummary(BaseModel):
+    token: str
+    scheduled_at: str
+    status: str
+    overall_score: Optional[float] = None
+    overall_feedback: Optional[str] = None
+    evaluation_url: Optional[str] = None
+    interview_url: Optional[str] = None
+
+
+class UserDetailResponse(UserResponse):
+    interviews: List[InterviewSummary] = []
+
+
 class ScheduleInterviewForUserRequest(BaseModel):
     user_id: str
     slot_id: str  # ID of the interview slot to book
@@ -2423,19 +2437,52 @@ async def get_all_users(
         )
 
 
-@app.get("/api/admin/users/{user_id}", response_model=UserResponse)
+@app.get("/api/admin/users/{user_id}", response_model=UserDetailResponse)
 async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin)):
     """
-    Get an enrolled user by ID.
+    Get an enrolled user by ID with full interview history.
     """
     try:
+        # 1. Fetch user profile
         user = user_service.get_user(user_id)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-        return UserResponse(**user)
+        
+        # 2. Fetch user bookings
+        bookings = booking_service.get_user_bookings(user_id)
+        
+        # 3. Fetch evaluations for those bookings
+        booking_tokens = [b["token"] for b in bookings]
+        evaluations = evaluation_service.get_evaluations_for_bookings(booking_tokens)
+        eval_map = {e["booking_token"]: e for e in evaluations}
+        
+        # 4. Construct interview summaries
+        interviews = []
+        for booking in bookings:
+            token = booking.get("token")
+            evaluation = eval_map.get(token)
+            
+            summary = InterviewSummary(
+                token=token,
+                scheduled_at=booking.get("scheduled_at", ""),
+                status=booking.get("status", "scheduled"),
+                overall_score=evaluation.get("overall_score") if evaluation else None,
+                overall_feedback=evaluation.get("overall_feedback") if evaluation else None,
+                evaluation_url=f"/evaluation/{token}" if evaluation else None,
+                interview_url=f"/interview/{token}" if booking.get("status") == "scheduled" else None
+            )
+            interviews.append(summary)
+            
+        # 5. Return detailed response
+        user_response = UserResponse(**user)
+        return UserDetailResponse(
+            **user_response.dict(),
+            interviews=interviews
+        )
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -3363,6 +3410,7 @@ class ApplicationFormSubmitRequest(BaseModel):
     # For PDF upload
     application_file_url: Optional[str] = None
     application_text: Optional[str] = None
+    extracted_json_url: Optional[str] = None
 
 
 class ApplicationFormResponse(BaseModel):
@@ -3431,6 +3479,7 @@ class ApplicationFormResponse(BaseModel):
     # For PDF upload
     application_file_url: Optional[str] = None
     application_text: Optional[str] = None
+    extracted_json_url: Optional[str] = None
 
 
 @app.get("/api/student/application-form", response_model=Optional[ApplicationFormResponse])
@@ -3700,11 +3749,28 @@ async def upload_application_form(
             file_content, file.filename, file.content_type
         )
         
-        # Parse application data using AI
+        # Parse application data
         parsed_data = {}
+        json_file_path = None
+        extracted_json_url = None
         if application_text:
             parsed_data = await resume_service.parse_application_data(application_text)
             logger.info(f"[API] Parsed {len(parsed_data)} fields from PDF")
+            
+            # Save parsed data as JSON file to local folder AND GridFS
+            try:
+                # 1. Save locally for debugging (Disabled for production)
+                # json_file_path = resume_service.save_extracted_data_to_json(parsed_data, file.filename)
+                # logger.info(f"[API] 💾 Extracted data saved locally to: {json_file_path}")
+                
+                # 2. Upload to GridFS for frontend access
+                import json
+                json_content = json.dumps(parsed_data, indent=2).encode('utf-8')
+                json_filename = f"{file.filename.split('.')[0]}_extracted.json"
+                extracted_json_url = booking_service.upload_application_to_storage(json_content, json_filename)
+                logger.info(f"[API] ☁️ Extracted data uploaded to GridFS: {extracted_json_url}")
+            except Exception as e:
+                logger.error(f"[API] Failed to save extracted JSON: {str(e)}")
         
         # Map parsed data to match database schema (same as manual form)
         # This ensures consistency between manual form and PDF upload
@@ -3772,6 +3838,7 @@ async def upload_application_form(
             # File Upload
             'application_file_url': application_url,
             'application_text': application_text if application_text else None,
+            'extracted_json_url': extracted_json_url,
         }
         
         # Convert date_of_birth string to DATE format if provided (same as manual form)
@@ -3803,11 +3870,11 @@ async def upload_application_form(
             if bool_field not in form_data:
                 form_data[bool_field] = False
         
-        # Save as 'draft' so user can review/edit (consistent with manual form workflow)
+        # Save as 'submitted' so user can proceed directly (student requested)
         form = application_form_service.create_or_update_form(
             enrolled_user['id'],
             form_data,
-            status='draft'
+            status='submitted'
         )
         
         logger.info(f"[API] ✅ Application form uploaded & parsed for user {enrolled_user['id']}")
