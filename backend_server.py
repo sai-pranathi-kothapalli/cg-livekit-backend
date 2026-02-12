@@ -17,7 +17,7 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", config.server.host)
     
     uvicorn.run(
-        "app.api.main:app",
+        "app.main:app",
         host=host,
         port=port,
         reload=False,  # Disable reload for production

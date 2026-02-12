@@ -1,13 +1,14 @@
 """
 User Service
 
-Handles enrolled user management operations with MongoDB.
+Handles enrolled user management operations with Supabase.
 """
 
 from typing import Optional, Dict, Any, List
+import uuid
 
 from app.config import Config
-from app.db.mongo import get_database, doc_with_id, to_object_id
+from app.db.supabase import get_supabase
 from app.utils.logger import get_logger
 from app.utils.exceptions import AgentError
 from app.utils.datetime_utils import get_now_ist
@@ -16,12 +17,11 @@ logger = get_logger(__name__)
 
 
 class UserService:
-    """Service for managing enrolled users using MongoDB"""
+    """Service for managing enrolled users using Supabase"""
 
     def __init__(self, config: Config):
         self.config = config
-        self.db = get_database(config)
-        self.col = self.db["enrolled_users"]
+        self.client = get_supabase()
 
     def create_user(
         self,
@@ -33,6 +33,7 @@ class UserService:
         try:
             now_iso = get_now_ist().isoformat()
             user_data = {
+                "id": str(uuid.uuid4()),
                 "name": name,
                 "email": email,
                 "phone": phone,
@@ -41,28 +42,24 @@ class UserService:
                 "created_at": now_iso,
                 "updated_at": now_iso,
             }
-            r = self.col.insert_one(user_data)
-            doc = self.col.find_one({"_id": r.inserted_id})
-            return doc_with_id(doc)
+            response = self.client.table("enrolled_users").insert(user_data).execute()
+            return response.data[0] if response.data else user_data
         except Exception as e:
             logger.error(f"Error creating user: {e}")
             raise AgentError(f"Failed to create user: {str(e)}", "UserService")
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         try:
-            doc = self.col.find_one({"email": email})
-            return doc_with_id(doc) if doc else None
+            response = self.client.table("enrolled_users").select("*").eq("email", email).execute()
+            return response.data[0] if response.data else None
         except Exception as e:
             logger.error(f"Error fetching user by email: {e}")
             return None
 
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
         try:
-            oid = to_object_id(user_id)
-            doc = self.col.find_one({"_id": oid} if oid else {"id": user_id})
-            if not doc:
-                doc = self.col.find_one({"id": user_id})
-            return doc_with_id(doc) if doc else None
+            response = self.client.table("enrolled_users").select("*").eq("id", user_id).execute()
+            return response.data[0] if response.data else None
         except Exception as e:
             logger.error(f"Error fetching user by ID: {e}")
             return None
@@ -74,12 +71,15 @@ class UserService:
     ) -> List[Dict[str, Any]]:
         """Get enrolled users with optional pagination. Max limit 500."""
         try:
-            cursor = self.col.find({}).sort("created_at", -1)
+            query = self.client.table("enrolled_users").select("*").order("created_at", desc=True)
+            
             if skip is not None and skip > 0:
-                cursor = cursor.skip(skip)
-            if limit is not None:
-                cursor = cursor.limit(min(limit, 500))
-            return [doc_with_id(d) for d in cursor]
+                query = query.range(skip, skip + (limit or 500) - 1)
+            elif limit is not None:
+                query = query.limit(min(limit, 500))
+            
+            response = query.execute()
+            return response.data if response.data else []
         except Exception as e:
             logger.error(f"Error fetching all users: {e}")
             return []
@@ -87,29 +87,27 @@ class UserService:
     def count_users(self) -> int:
         """Total count of enrolled users (for pagination)."""
         try:
-            return self.col.count_documents({})
+            response = self.client.table("enrolled_users").select("id", count="exact").execute()
+            return response.count if response.count is not None else 0
         except Exception as e:
             logger.error(f"Error counting users: {e}")
             return 0
 
     def update_user(self, user_id: str, **kwargs) -> Dict[str, Any]:
         try:
-            oid = to_object_id(user_id)
-            q = {"_id": oid} if oid else {"id": user_id}
-            self.col.update_one(q, {"$set": kwargs})
-            doc = self.col.find_one(q)
-            if not doc:
+            kwargs['updated_at'] = get_now_ist().isoformat()
+            response = self.client.table("enrolled_users").update(kwargs).eq("id", user_id).execute()
+            
+            if not response.data:
                 raise AgentError("Failed to update user", "UserService")
-            return doc_with_id(doc)
+            return response.data[0]
         except Exception as e:
             logger.error(f"Error updating user: {e}")
             raise AgentError(f"Failed to update user: {str(e)}", "UserService")
 
     def delete_user(self, user_id: str) -> bool:
         try:
-            oid = to_object_id(user_id)
-            q = {"_id": oid} if oid else {"id": user_id}
-            self.col.delete_one(q)
+            self.client.table("enrolled_users").delete().eq("id", user_id).execute()
             return True
         except Exception as e:
             logger.error(f"Error deleting user: {e}")

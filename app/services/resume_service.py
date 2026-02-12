@@ -6,7 +6,7 @@ Handles application file upload, text extraction, and storage.
 
 import re
 from io import BytesIO
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from pathlib import Path
 from datetime import datetime
 
@@ -36,15 +36,31 @@ _NEXT_FIELD_LABELS = (
     "Regional Rural Bank", "RRB", "Exam Center", "Medium of Paper",
 )
 
-# Section headers in IBPS RRB / CRP application forms. Order matters for chunking.
+# Section headers in resumes and IBPS RRB / CRP application forms.
 # Each tuple: (chunk_key, regex_pattern). Pattern is used to find section start (case-insensitive).
 _SECTION_HEADERS = (
-    ("personal", re.compile(r"Personal\s+Details?", re.IGNORECASE)),
-    ("correspondence_address", re.compile(r"Correspondence\s+Address|Address\s+Details?", re.IGNORECASE)),
-    ("permanent_address", re.compile(r"Permanent\s+Address", re.IGNORECASE)),
-    ("education", re.compile(r"Educational\s+Qualification|Education\s+Details?|SSC\s*[\/]?\s*HSC|Graduation", re.IGNORECASE)),
-    ("other", re.compile(r"Other\s+Details?|Declaration|Preference|Exam\s+Center|State\s+Applying", re.IGNORECASE)),
+    ("personal", re.compile(r"Personal\s+Details?|Contact\s+Info", re.IGNORECASE)),
+    ("skills", re.compile(r"Skills|Technical\s+Skills|Competencies|Expertise", re.IGNORECASE)),
+    ("experience", re.compile(r"Experience|Work\s+Experience|Professional\s+Experience|Employment|Work\s+History", re.IGNORECASE)),
+    ("projects", re.compile(r"Projects|Academic\s+Projects|Personal\s+Projects", re.IGNORECASE)),
+    ("education", re.compile(r"Educational\s+Qualification|Education|Academic\s+Background|SSC\s*[\/]?\s*HSC|Graduation", re.IGNORECASE)),
+    ("certifications", re.compile(r"Certifications|Courses|Training|Achievements", re.IGNORECASE)),
+    ("other", re.compile(r"Other\s+Details?|Declaration|Preference|Exam\s+Center|State\s+Applying|Interests|Hobbies", re.IGNORECASE)),
 )
+
+# Comprehensive list of technical skills for dictionary matching
+_SKILL_KEYWORDS = [
+    "Python", "Java", "JavaScript", "TypeScript", "HTML", "CSS", "React", "Vue", "Angular",
+    "Node.js", "Express", "FastAPI", "Flask", "Django", "SQL", "PostgreSQL", "MySQL", "MongoDB",
+    "Oracle", "SQLite", "AWS", "Azure", "GCP", "Kubernetes", "Docker", "Git", "GitHub", "GitLab",
+    "Jenkins", "CI/CD", "Machine Learning", "AI", "Deep Learning", "NLP", "Computer Vision",
+    "Data Science", "C", "C++", "C#", "Go", "Rust", "PHP", "Ruby", "Swift", "Kotlin", "Dart",
+    "Tailwind", "Bootstrap", "Material UI", "Redux", "GraphQL", "REST API", "Microservices",
+    "TensorFlow", "PyTorch", "Pandas", "NumPy", "Scikit-learn", "Keras", "Opencv", "Matplotlib",
+    "Seaborn", "Spark", "Hadoop", "Docker Compose", "Terraform", "Ansible", "Linux", "Unix",
+    "Windows", "MacOS", "Flutter", "React Native", "Ionic", "Xamarin", "Firebase", "Supabase",
+    "Redis", "Elasticsearch", "Nginx", "Apache", "JUnit", "Selenium", "Postman", "Agile", "Scrum"
+]
 
 
 class ResumeService:
@@ -421,13 +437,30 @@ class ResumeService:
         text_clean = self._clean_text(text)
         logger.info("[ResumeService] Using regex-based parsing")
         chunks = self._chunk_by_sections(text_clean)
+        
         # Resolve which text to use per field (section chunk or full-text fallback)
         personal = chunks.get("personal", text_clean)
-        corr_addr = chunks.get("correspondence_address", text_clean)
-        perm_addr = chunks.get("permanent_address", text_clean)
+        skills_text = chunks.get("skills", "")
+        experience_text = chunks.get("experience", "")
+        projects_text = chunks.get("projects", "")
         education = chunks.get("education", text_clean)
         other = chunks.get("other", text_clean)
         out: Dict[str, Any] = {}
+
+        # 1. NEW: Extract Skills (Dictionary based)
+        extracted_skills = self._extract_skills_from_text(text_clean, skills_text)
+        if extracted_skills:
+            out["skills"] = extracted_skills
+
+        # 2. NEW: Extract Projects (Section split based)
+        if projects_text:
+            extracted_projects = self._extract_projects_from_text(projects_text)
+            if extracted_projects:
+                out["projects"] = extracted_projects
+
+        # 3. NEW: Extract Experience (Raw section for now)
+        if experience_text:
+            out["experience"] = experience_text.strip()
 
         # Personal details – from personal section only
         full_name = self._extract_label_value(
@@ -511,17 +544,6 @@ class ResumeService:
         if spouse:
             out["spouse_name"] = spouse
 
-        # Correspondence address – from correspondence section
-        for key, labels in (
-            ("correspondence_address1", ("Correspondence Address", "Address Line 1", "Address 1", "Correspondence Add")),
-            ("correspondence_state", ("Correspondence State", "State", "Correspondence State")),
-            ("correspondence_district", ("Correspondence District", "District", "Corr District")),
-            ("correspondence_pincode", ("Correspondence Pincode", "Pincode", "Pin Code", "PIN")),
-        ):
-            v = self._extract_label_value(corr_addr, labels)
-            if v:
-                out[key] = v
-
         # Permanent address – from permanent section or full text fallback
         for key, labels in (
             ("permanent_address1", ("Permanent Address", "Permanent Add", "Address Line 1", "Permanent Addr", "P Address")),
@@ -529,10 +551,7 @@ class ResumeService:
             ("permanent_district", ("Permanent District", "District")),
             ("permanent_pincode", ("Permanent Pincode", "Permanent Pin", "Pin")),
         ):
-            v = self._extract_label_value(perm_addr, labels)
-            # Fallback to full text if not found in section
-            if not v:
-                v = self._extract_label_value(text_clean, labels)
+            v = self._extract_label_value(text_clean, labels) # Fallback to full text for address
             if v:
                 out[key] = v
 
@@ -610,9 +629,46 @@ class ResumeService:
             medium = self._extract_label_value(text_clean, ("Medium of Paper", "Medium", "Paper Medium"))
         if medium:
             out["medium_of_paper"] = medium
-
         logger.info(f"[ResumeService] Parsed {len(out)} fields from PDF (chunk-by-section, no API)")
         return out
+
+    def _extract_skills_from_text(self, text: str, skills_section: Optional[str] = None) -> List[str]:
+        """Extract skills from text using dictionary matching."""
+        found_skills = set()
+        
+        # Search in skills section first if provided
+        search_text = skills_section if skills_section and len(skills_section) > 20 else text
+        
+        for skill in _SKILL_KEYWORDS:
+            # Use regex for word boundaries to avoid partial matches
+            pattern = rf'\b{re.escape(skill)}\b'
+            if re.search(pattern, search_text, re.IGNORECASE):
+                found_skills.add(skill)
+        
+        return sorted(list(found_skills))
+
+    def _extract_projects_from_text(self, projects_section: str) -> List[str]:
+        """Extract projects from the projects section by splitting by common delimiters."""
+        if not projects_section or len(projects_section.strip()) < 10:
+            return []
+        
+        # Remove the header if it exists
+        projects_text = re.sub(r'^(?:Projects|Academic\s+Projects|Personal\s+Projects)\s*:?\s*', '', projects_section, flags=re.IGNORECASE)
+        
+        # Split by bullet points, newlines, or double newlines
+        delimiters = [r'\n\s*•\s*', r'\n\s*\*\s*', r'\n\s*-\s*', r'\n\s*\d+\.\s*', r'\n\n']
+        combined_pattern = '|'.join(delimiters)
+        
+        raw_projects = re.split(combined_pattern, projects_text)
+        
+        # Clean and filter projects
+        projects = []
+        for p in raw_projects:
+            cleaned = p.strip()
+            if cleaned and len(cleaned) > 10:
+                projects.append(cleaned)
+        
+        return projects
 
     def save_extracted_data_to_json(self, data: Dict[str, Any], original_filename: str) -> str:
         """

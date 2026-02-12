@@ -71,10 +71,10 @@ class SileroVADConfig:
 
 
 @dataclass
-class MongoConfig:
-    """MongoDB configuration"""
-    uri: str
-    db_name: Optional[str] = None  # Database name; if unset, uses 'interview'
+class SupabaseConfig:
+    """Supabase configuration"""
+    url: str
+    key: str
 
 
 @dataclass
@@ -113,8 +113,8 @@ class Config:
     # AI Services - LLM primary (Google Gemini)
     gemini_llm: GeminiConfig
     
-    # MongoDB configuration
-    mongo: MongoConfig
+    # Supabase configuration
+    supabase: SupabaseConfig
     
     # SMTP configuration
     smtp: SMTPConfig
@@ -207,10 +207,13 @@ class Config:
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required (primary LLM)")
         
-        # Validate MongoDB URI
-        mongodb_uri = os.getenv("MONGODB_URI")
-        if not mongodb_uri:
-            raise ValueError("MONGODB_URI environment variable is required")
+        # Validate Supabase variables
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not supabase_url:
+            raise ValueError("SUPABASE_URL environment variable is required")
+        if not supabase_key:
+            raise ValueError("SUPABASE_SERVICE_KEY environment variable is required")
         
         # SMTP configuration (optional)
         smtp_port = os.getenv("SMTP_PORT", "587")
@@ -246,9 +249,9 @@ class Config:
                 api_key=gemini_api_key,
                 model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
             ),
-            mongo=MongoConfig(
-                uri=mongodb_uri,
-                db_name=os.getenv("MONGODB_DB_NAME") or None,
+            supabase=SupabaseConfig(
+                url=os.getenv("SUPABASE_URL", ""),
+                key=os.getenv("SUPABASE_SERVICE_KEY", ""),
             ),
             smtp=SMTPConfig(
                 host=os.getenv("SMTP_HOST"),

@@ -55,6 +55,8 @@ async def get_current_user(
     # Fetch user from database based on role
     if role == 'admin':
         user = auth_service.get_admin_by_id(user_id)
+    elif role == 'manager':
+        user = auth_service.get_user_by_id(user_id)
     elif role == 'student':
         user = auth_service.get_student_by_id(user_id)
     else:
@@ -71,6 +73,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    logger.debug(f"[Auth] Authenticated user {user_id} with role {role}")
     return user
 
 
@@ -83,10 +86,10 @@ async def get_current_admin(
     Raises:
         HTTPException: If user is not an admin
     """
-    if current_user.get('role') != 'admin':
+    if current_user.get('role') not in ('admin', 'manager'):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
+            detail="Admin or Manager access required"
         )
     return current_user
 
@@ -101,6 +104,7 @@ async def get_current_student(
         HTTPException: If user is not a student
     """
     if current_user.get('role') != 'student':
+        logger.warning(f"[Auth] 403 Forbidden: User {current_user.get('id')} has role {current_user.get('role')}, student required")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Student access required"
@@ -131,9 +135,10 @@ def get_optional_user(
     if not user_id or not role:
         return None
     
-    # Fetch user from database based on role
     if role == 'admin':
         return auth_service.get_admin_by_id(user_id)
+    elif role == 'manager':
+        return auth_service.get_user_by_id(user_id)
     elif role == 'student':
         return auth_service.get_student_by_id(user_id)
     

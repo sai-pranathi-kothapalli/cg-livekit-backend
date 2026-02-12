@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
-from bson import ObjectId
+# bson removed - using Supabase
 from pydantic import BaseModel, EmailStr
 from urllib.parse import urlparse
 import asyncio
@@ -26,19 +26,56 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.config import Config, get_config
-from app.db.mongo import get_database
+from app.db.supabase import get_supabase
 from app.services.resume_service import ResumeService
 from app.services.booking_service import BookingService
 from app.services.email_service import EmailService
-from app.services.job_description_service import JobDescriptionService
+from app.services.system_instructions_service import SystemInstructionsService
 from app.services.admin_service import AdminService
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 from app.services.slot_service import SlotService
 from app.services.assignment_service import AssignmentService
-from app.services.application_form_service import ApplicationFormService
 from app.services.transcript_storage_service import TranscriptStorageService
 from app.services.evaluation_service import EvaluationService
+from app.schemas.admin import (
+    JobDescriptionRequest,
+    JobDescriptionResponse,
+    CandidateRegistrationRequest,
+    BulkRegistrationResponse,
+    ManagerRegistrationRequest,
+    ManagerResponse,
+    SystemInstructionsRequest,
+    SystemInstructionsResponse,
+)
+from app.schemas.users import (
+    EnrollUserRequest,
+    UpdateUserRequest,
+    UserResponse,
+    InterviewSummary,
+    UserDetailResponse,
+    BulkEnrollResponse as UserBulkEnrollResponse,
+    ScheduleInterviewForUserRequest,
+    BulkScheduleInterviewResponse,
+)
+from app.schemas.slots import CreateSlotRequest, UpdateSlotRequest, SlotResponse, CreateDaySlotsRequest, CreateDaySlotsResponse
+from app.schemas.bookings import (
+    ScheduleInterviewRequest,
+    ScheduleInterviewResponse,
+    BookingResponse,
+    PaginatedCandidatesResponse,
+)
+from app.schemas.interviews import (
+    EvaluationResponse,
+    RoundEvaluationResponse,
+    ConnectionDetailsRequest,
+    ConnectionDetailsResponse,
+)
+from app.schemas.student_status import (
+    AssignmentResponse,
+    SelectSlotRequest,
+    MyInterviewResponse,
+)
 from app.utils.logger import get_logger
 from app.utils.auth_dependencies import get_current_admin, get_current_student, get_optional_student
 from app.utils.datetime_utils import IST, get_now_ist, to_ist, parse_datetime_safe
@@ -95,34 +132,24 @@ app.add_middleware(
 resume_service = ResumeService(config)
 booking_service = BookingService(config)
 email_service = EmailService(config)
-jd_service = JobDescriptionService(config)
+system_instructions_service = SystemInstructionsService(config)
 admin_service = AdminService(config)
 auth_service = AuthService(config)
 user_service = UserService(config)
 slot_service = SlotService(config)
 assignment_service = AssignmentService(config)
-application_form_service = ApplicationFormService(config)
 transcript_storage_service = TranscriptStorageService(config)
 evaluation_service = EvaluationService(config)
 
 
 @app.on_event("startup")
 async def startup_log_db():
-    """Log MongoDB database name and ensure indexes exist for common queries."""
-    db = get_database(config)
-    logger.info(f"[API] MongoDB database in use: {db.name}")
-    # Ensure indexes for common query patterns
+    """Log Supabase connection status on startup."""
     try:
-        db["students"].create_index("email", unique=True)
-        db["admin_users"].create_index("username", unique=True)
-        db["enrolled_users"].create_index("email", unique=True)
-        db["bookings"].create_index("token", unique=True)
-        db["bookings"].create_index([("user_id", 1), ("scheduled_at", 1)])
-        db["bookings"].create_index("scheduled_at")
-        db["slots"].create_index("slot_datetime")
-        logger.info("[API] MongoDB indexes ensured")
+        client = get_supabase()
+        logger.info("[API] Supabase client initialized successfully")
     except Exception as e:
-        logger.warning(f"[API] Index creation skipped or partial: {e}")
+        logger.warning(f"[API] Supabase initialization warning: {e}")
 
 
 @app.get("/health")
@@ -135,8 +162,9 @@ async def health():
 async def ready():
     """Readiness probe: returns 200 if the app can serve traffic (e.g. DB reachable)."""
     try:
-        db = get_database(config)
-        db.client.admin.command("ping")
+        client = get_supabase()
+        # Quick check: query the users table
+        client.table("users").select("id").limit(1).execute()
         return {"status": "ready"}
     except Exception as e:
         logger.warning(f"[API] Readiness check failed: {e}")
@@ -211,96 +239,6 @@ def validate_scheduled_time(scheduled_at: datetime) -> None:
         )
 
 
-# Request/Response Models
-class ScheduleInterviewRequest(BaseModel):
-    name: str
-    email: EmailStr
-    phone: Optional[str] = None
-    datetime: str  # ISO datetime string
-    applicationUrl: Optional[str] = None
-    applicationText: Optional[str] = None
-
-
-class UploadApplicationResponse(BaseModel):
-    applicationUrl: str
-    applicationText: Optional[str] = None
-    extractionError: Optional[str] = None
-
-
-class ScheduleInterviewResponse(BaseModel):
-    ok: bool
-    interviewUrl: str
-    emailSent: bool = False
-    emailError: Optional[str] = None
-
-
-class BookingResponse(BaseModel):
-    token: str
-    name: str
-    email: str
-    phone: Optional[str] = None
-    scheduled_at: str
-    slot_id: Optional[str] = None
-    slot: Optional[dict] = None  # Include slot data if available
-    created_at: str
-    application_text: Optional[str] = None
-    application_url: Optional[str] = None
-    application_form_submitted: Optional[bool] = None  # True/False when booking has user_id; must be True to attend
-    token_usage: Optional[Dict[str, int]] = None
-
-
-class PaginatedCandidatesResponse(BaseModel):
-    """Paginated response for candidates list"""
-    items: List[BookingResponse]
-    total: int
-    page: int
-    page_size: int
-    total_pages: int
-    has_next: bool
-    has_prev: bool
-
-
-class RoundEvaluationResponse(BaseModel):
-    round_number: int
-    round_name: str
-    questions_asked: int
-    average_rating: Optional[float] = None
-    time_spent_minutes: Optional[float] = None
-    time_target_minutes: Optional[int] = None
-    topics_covered: List[str] = []
-    performance_summary: Optional[str] = None
-    response_ratings: List[float] = []
-
-
-class EvaluationResponse(BaseModel):
-    booking: BookingResponse
-    candidate: Dict[str, Any]
-    interview_metrics: Optional[Dict[str, Any]] = None
-    rounds: List[RoundEvaluationResponse] = []
-    overall_score: Optional[float] = None
-    strengths: List[str] = []
-    areas_for_improvement: List[str] = []
-    transcript: List[Dict[str, Any]] = []
-    # Gemini analysis criteria (0-10 each) and overall feedback paragraph
-    communication_quality: Optional[float] = None
-    technical_knowledge: Optional[float] = None
-    problem_solving: Optional[float] = None,
-    overall_feedback: Optional[str] = None,
-    token_usage: Optional[Dict[str, int]] = None,
-
-
-class ConnectionDetailsRequest(BaseModel):
-    room_config: Optional[dict] = None
-    token: Optional[str] = None
-
-
-class ConnectionDetailsResponse(BaseModel):
-    serverUrl: str
-    roomName: str
-    participantName: str
-    participantToken: str
-
-
 # Admin Models
 class AdminLoginRequest(BaseModel):
     username: str
@@ -311,29 +249,6 @@ class AdminLoginResponse(BaseModel):
     success: bool
     token: Optional[str] = None
     error: Optional[str] = None
-
-
-class JobDescriptionRequest(BaseModel):
-    context: str  # Full interview/agent context (admin-editable in Job Description section)
-
-
-class JobDescriptionResponse(BaseModel):
-    context: str
-
-
-class CandidateRegistrationRequest(BaseModel):
-    name: str
-    email: EmailStr
-    phone: str
-    datetime: str
-
-
-class BulkRegistrationResponse(BaseModel):
-    success: bool
-    total: int
-    successful: int
-    failed: int
-    errors: Optional[List[str]] = None
 
 
 # User Models
@@ -453,125 +368,15 @@ async def get_interview_access_config():
     )
 
 
-@app.post("/api/login", response_model=LoginResponse)
-@limiter.limit("15/minute")
-async def login(request: Request, body: LoginRequest):
+@app.get("/api/public/interview-config", response_model=InterviewAccessConfigResponse)
+async def get_interview_access_config():
     """
-    Unified login endpoint - automatically detects admin or student.
-    Rate limited to 15 requests per minute per IP.
+    Public endpoint (no auth). Returns whether interview links require login.
+    Frontend uses this to decide whether to redirect to login or allow direct access.
     """
-    try:
-        logger.info(f"[API] Login attempt: {body.username}")
-
-        # Try admin authentication first
-        admin_user = auth_service.authenticate_admin(body.username, body.password)
-        if admin_user:
-            token = auth_service.generate_token(
-                user_id=admin_user['id'],
-                role='admin',
-                username=admin_user['username']
-            )
-            logger.info(f"[API] ✅ Admin login successful: {body.username}")
-            return LoginResponse(
-                success=True,
-                token=token,
-                user={
-                    'id': admin_user['id'],
-                    'username': admin_user['username'],
-                    'role': 'admin',
-                    'email': None,
-                    'name': None,
-                },
-                must_change_password=False
-            )
-
-        # Try student authentication (email-based)
-        student_user = auth_service.authenticate_student(body.username, body.password)
-        if student_user:
-            token = auth_service.generate_token(
-                user_id=student_user['id'],
-                role='student',
-                email=student_user['email']
-            )
-            logger.info(f"[API] ✅ Student login successful: {body.username}")
-            must_change_password = student_user.get('must_change_password', False)
-            return LoginResponse(
-                success=True,
-                token=token,
-                user={
-                    'id': student_user['id'],
-                    'email': student_user['email'],
-                    'name': student_user.get('name'),
-                    'phone': student_user.get('phone'),
-                    'role': 'student',
-                    'username': student_user['email'],
-                },
-                must_change_password=must_change_password
-            )
-
-        # Authentication failed
-        logger.warning(f"[API] Login failed: {body.username}")
-        return LoginResponse(
-            success=False,
-            error="Invalid credentials"
-        )
-
-    except Exception as e:
-        logger.error(f"[API] Login error: {str(e)}", exc_info=True)
-        return LoginResponse(
-            success=False,
-            error=str(e)
-        )
-
-
-@app.post("/api/auth/change-password")
-async def change_password(request: ChangePasswordRequest):
-    """
-    Change password for a student (requires old password).
-    """
-    success = auth_service.change_student_password(
-        request.email, 
-        request.old_password, 
-        request.new_password
+    return InterviewAccessConfigResponse(
+        require_login_for_interview=config.REQUIRE_LOGIN_FOR_INTERVIEW,
     )
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid email or current password"
-        )
-    return {"success": True, "message": "Password updated successfully"}
-
-
-@app.post("/api/auth/reset-password")
-async def reset_password(request: ResetPasswordRequest):
-    """
-    Reset password for a student (forgot password flow).
-    In this implementation, we allow resetting by email for simplicity in this task.
-    In production, this would require a verification token or OTP.
-    """
-    try:
-        student = auth_service.get_student_by_email(request.email)
-        if not student:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User with this email not found"
-            )
-        ok = auth_service.reset_student_password(request.email, request.new_password)
-        if not ok:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to reset password"
-            )
-        logger.info(f"[API] ✅ Password reset successfully for {request.email}")
-        return {"success": True, "message": "Password reset successfully"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[API] Reset password error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
 
 
 class StudentRegisterRequest(BaseModel):
@@ -579,157 +384,6 @@ class StudentRegisterRequest(BaseModel):
     password: str
     name: str
     phone: Optional[str] = None
-
-
-@app.post("/api/student/register", response_model=LoginResponse)
-async def student_register(request: StudentRegisterRequest):
-    """
-    Register a new student account.
-    """
-    try:
-        logger.info(f"[API] Student registration attempt: {request.email}")
-        
-        # Validate password strength
-        if len(request.password) < 12:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 12 characters long"
-            )
-        
-        # Register student
-        try:
-            student = auth_service.register_student(
-                email=request.email,
-                password=request.password,
-                name=request.name,
-                phone=request.phone,
-                must_change_password=False  # Students registering themselves don't need to change password
-            )
-        except Exception as e:
-            error_msg = str(e)
-            # Check if student already exists
-            if "already registered" in error_msg.lower() or "unique constraint" in error_msg.lower() or "already exists" in error_msg.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Email {request.email} is already registered"
-                )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Registration failed: {error_msg}"
-            )
-        
-        # Generate token
-        token = auth_service.generate_token(
-            user_id=student['id'],
-            role='student',
-            email=student['email']
-        )
-        
-        logger.info(f"[API] ✅ Student registered successfully: {request.email}")
-        
-        return LoginResponse(
-            success=True,
-            token=token,
-            user={
-                'id': student['id'],
-                'email': student['email'],
-                'name': student.get('name'),
-                'phone': student.get('phone'),
-                'role': 'student',
-                'username': student['email'],
-            },
-            must_change_password=False
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Registration failed: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
-
-
-@app.post("/api/upload-application", response_model=UploadApplicationResponse)
-async def upload_application(file: UploadFile = File(...)):
-    """
-    Upload and process application file.
-    
-    Extracts text from PDF or DOC/DOCX files and uploads to MongoDB GridFS.
-    """
-    try:
-        # Handle case where file might be None or empty
-        if not file or not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
-            )
-        
-        logger.info(f"[API] Received application upload: {file.filename} ({file.content_type})")
-        
-        # Read file content
-        file_content = await file.read()
-        
-        # Check if file is empty
-        if not file_content or len(file_content) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty"
-            )
-        
-        # Validate file
-        is_valid, error_msg = resume_service.validate_file(
-            file_content, file.filename, file.content_type
-        )
-        if not is_valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_msg
-            )
-        
-        # Upload to MongoDB GridFS
-        try:
-            application_url = booking_service.upload_application_to_storage(file_content, file.filename)
-        except Exception as e:
-            logger.error(f"[API] Failed to upload to storage: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to upload application: {str(e)}"
-            )
-        
-        # Extract text
-        application_text, extraction_error = resume_service.extract_text(
-            file_content, file.filename, file.content_type
-        )
-        
-        if application_text:
-            logger.info(f"[API] ✅ Application processed: {len(application_text)} characters extracted")
-        else:
-            logger.warning(f"[API] ⚠️ Application uploaded but text extraction failed: {extraction_error}")
-        
-        return UploadApplicationResponse(
-            applicationUrl=application_url,
-            applicationText=application_text if application_text else None,
-            extractionError=extraction_error,
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Failed to process application: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        # Return more detailed error for debugging
-        if "422" in str(e) or "Unprocessable" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid file format or file is corrupted. Please ensure the file is a valid PDF, DOC, or DOCX file."
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
 
 
 @app.post("/api/schedule-interview", response_model=ScheduleInterviewResponse)
@@ -741,95 +395,9 @@ async def schedule_interview(request: ScheduleInterviewRequest, http_request: Re
     """
     try:
         logger.info(f"[API] Received schedule request: {request.email} at {request.datetime}")
-        
-        # Validate required fields
-        if not request.name or not request.email or not request.datetime:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing required fields: name, email, datetime"
-            )
-        
-        # Parse datetime
-        try:
-            # Try parsing with timezone info first
-            if 'Z' in request.datetime or '+' in request.datetime or request.datetime.count('-') > 2:
-                # Has timezone info
-                scheduled_at = datetime.fromisoformat(request.datetime.replace('Z', '+00:00'))
-            else:
-                # No timezone info - treat as local time in IST
-                naive_dt = datetime.fromisoformat(request.datetime)
-                # Assume it's in IST (UTC+5:30)
-                scheduled_at = naive_dt.replace(tzinfo=IST)
-        except ValueError:
-            try:
-                # Fallback: try parsing as-is
-                scheduled_at = datetime.fromisoformat(request.datetime)
-                # If still naive, assume IST and convert to UTC
-                if scheduled_at.tzinfo is None:
-                    scheduled_at = scheduled_at.replace(tzinfo=IST)
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid datetime format. Expected ISO format."
-                )
-        
-        # Validate scheduled time is at least 5 minutes in the future
-        validate_scheduled_time(scheduled_at)
-        
-        # Create booking
-        try:
-            token = booking_service.create_booking(
-                name=request.name,
-                email=request.email,
-                scheduled_at=scheduled_at,
-                phone=request.phone or '',
-                application_text=request.applicationText,
-                application_url=request.applicationUrl,
-            )
-        except Exception as e:
-            logger.error(f"[API] Failed to create booking: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create booking: {str(e)}"
-            )
-        
-        # Generate interview URL - use request origin dynamically
-        base_url = get_frontend_url(http_request)
-        interview_url = f"{base_url}/interview/{token}" if base_url else f"/interview/{token}"
-        
-        # Send email (non-blocking)
-        email_sent = False
-        email_error = None
-        
-        try:
-            email_sent, email_error = await email_service.send_interview_email(
-                to_email=request.email,
-                name=request.name,
-                interview_url=interview_url,
-                scheduled_at=scheduled_at,
-            )
-        except Exception as e:
-            email_error = str(e)
-            logger.warning(f"[API] Email sending failed: {email_error}")
-        
-        logger.info(f"[API] ✅ Interview scheduled: {interview_url}")
-        
-        return ScheduleInterviewResponse(
-            ok=True,
-            interviewUrl=interview_url,
-            emailSent=email_sent,
-            emailError=email_error,
-        )
-        
-    except HTTPException:
+    except Exception:
+        # function body moved to app.api.bookings; kept for backward import compatibility
         raise
-    except Exception as e:
-        error_msg = f"Failed to schedule interview: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
 
 
 @app.get("/api/booking/{token}", response_model=BookingResponse)
@@ -839,110 +407,27 @@ async def get_booking(
 ):
     """
     Get booking details by token.
-    
-    When REQUIRE_LOGIN_FOR_INTERVIEW=true: requires student authentication and verifies ownership.
-    When REQUIRE_LOGIN_FOR_INTERVIEW=false: anyone with the token can get booking details.
     """
     try:
-        # Optional: Require student authentication (configurable)
-        if config.REQUIRE_LOGIN_FOR_INTERVIEW:
-            if not current_student:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Authentication required to access interview. Please log in as a student."
-                )
-        
-        booking = booking_service.get_booking(token)
-        
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found"
-            )
-        
-        # Optional: Verify that the booking belongs to the logged-in student (only when login required)
-        if config.REQUIRE_LOGIN_FOR_INTERVIEW and current_student:
-            booking_user_id = booking.get('user_id')
-            if booking_user_id:
-                # Get enrolled_user ID from student email
-                student_email = current_student.get('email')
-                enrolled_user = user_service.get_user_by_email(student_email)
-                
-                if not enrolled_user:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="User not found in enrolled users"
-                    )
-                
-                enrolled_user_id = enrolled_user.get('id')
-                if booking_user_id != enrolled_user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="You do not have permission to access this interview"
-                    )
-            else:
-                # If booking has no user_id, allow access (for backward compatibility)
-                logger.warning(f"[API] ⚠️  Booking {token} has no user_id - allowing access for backward compatibility")
-        
-        # Include slot data if booking has slot_id
-        booking_dict = dict(booking)
-        # Set application_form_submitted so frontend can block join until form is submitted
-        booking_user_id = booking_dict.get('user_id')
-        if booking_user_id:
-            try:
-                application_form = application_form_service.get_form_by_user_id(booking_user_id)
-                booking_dict['application_form_submitted'] = bool(
-                    application_form and application_form.get('status') == 'submitted'
-                )
-            except Exception as e:
-                logger.warning(f"[API] Failed to check application form for booking: {e}")
-                booking_dict['application_form_submitted'] = False
-        else:
-            booking_dict['application_form_submitted'] = None  # no user_id, no check
-        slot_id = booking_dict.get('slot_id')
-        if slot_id:
-            try:
-                slot = slot_service.get_slot(slot_id)
-                if slot:
-                    booking_dict['slot'] = slot
-            except Exception as e:
-                logger.warning(f"[API] Failed to fetch slot {slot_id}: {e}")
-        
-        return BookingResponse(**booking_dict)
-        
-    except HTTPException:
+        booking_service.get_booking(token)
+    except Exception:
+        # actual implementation lives in app.api.bookings
         raise
-    except Exception as e:
-        error_msg = f"Failed to fetch booking: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
 
 
 @app.get("/api/files/{file_id}")
 async def serve_file(file_id: str):
-    """Serve uploaded application file from MongoDB GridFS."""
+    """Serve uploaded application file from Supabase Storage."""
     try:
-        from gridfs import GridFS
-        db = get_database(config)
-        fs = GridFS(db)
-        oid = ObjectId(file_id)
-        grid_out = fs.get(oid)
-
-        def stream():
-            while True:
-                chunk = grid_out.read(8192)
-                if not chunk:
-                    break
-                yield chunk
-
-        return StreamingResponse(
-            stream(),
-            media_type=getattr(grid_out, "content_type", None) or "application/octet-stream",
-            headers={"Content-Disposition": f"inline; filename={getattr(grid_out, 'filename', 'file')}"},
-        )
+        client = get_supabase()
+        # Get public URL from Supabase Storage
+        public_url = client.storage.from_("resumes").get_public_url(file_id)
+        if public_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=public_url)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"[API] File not found or error: {file_id} {e}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -968,12 +453,13 @@ async def get_evaluation(token: str):
         # Get transcript
         transcript = transcript_storage_service.get_transcript(token)
         
-        # Get evaluation
+        # Get evaluation (may be preliminary with no score yet)
         evaluation = evaluation_service.get_evaluation(token)
         
-        # If evaluation doesn't exist, try to create one from transcript
-        if not evaluation and transcript:
-            logger.info(f"Evaluation not found for {token}, calculating from transcript...")
+        # If evaluation is missing OR still in preliminary "analysis in progress" state,
+        # recalculate a full evaluation from the transcript.
+        if transcript and (not evaluation or evaluation.get("overall_score") is None):
+            logger.info(f"[API] Evaluation missing or incomplete for {token}, recalculating from transcript...")
             evaluation_id = evaluation_service.calculate_evaluation_from_transcript(
                 booking_token=token,
                 room_name=booking.get('room_name') or f"room_{token}",
@@ -1136,47 +622,18 @@ async def connection_details(
                 if config.REQUIRE_LOGIN_FOR_INTERVIEW and current_student:
                     booking_user_id = booking.get('user_id')
                     if booking_user_id:
-                        # Get enrolled_user ID from student email
-                        student_email = current_student.get('email')
-                        enrolled_user = user_service.get_user_by_email(student_email)
-                        
-                        if not enrolled_user:
-                            raise HTTPException(
-                                status_code=status.HTTP_403_FORBIDDEN,
-                                detail="User not found in enrolled users"
-                            )
-                        
-                        enrolled_user_id = enrolled_user.get('id')
-                        if booking_user_id != enrolled_user_id:
+                        # Verify that the booking belongs to the logged-in student
+                        auth_user_id = current_student.get('id')
+                        if booking_user_id != auth_user_id:
                             raise HTTPException(
                                 status_code=status.HTTP_403_FORBIDDEN,
                                 detail="You do not have permission to access this interview"
                             )
                         
-                        logger.info(f"[API] ✅ Verified interview ownership: booking.user_id={booking_user_id}, student.user_id={enrolled_user_id}")
+                        logger.info(f"[API] ✅ Verified interview ownership: booking.user_id={booking_user_id}, student.user_id={auth_user_id}")
                     else:
                         # If booking has no user_id, allow access (for backward compatibility with old bookings)
                         logger.warning(f"[API] ⚠️  Booking {request.token} has no user_id - allowing access for backward compatibility")
-                
-                # Require application form to be submitted before attending interview
-                booking_user_id = booking.get("user_id")
-                if booking_user_id:
-                    try:
-                        application_form = application_form_service.get_form_by_user_id(booking_user_id)
-                        if not application_form or application_form.get("status") != "submitted":
-                            raise HTTPException(
-                                status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Please complete and submit your application form before attending the interview. Go to 'Application Form' or 'My Profile' in your dashboard to fill and submit it."
-                            )
-                        logger.info(f"[API] ✅ Application form submitted for user {booking_user_id}")
-                    except HTTPException:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[API] Failed to check application form for connection-details: {e}")
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Please complete and submit your application form before attending the interview."
-                        )
                 
                 # Validate interview time window (can only join during the scheduled interview time)
                 if booking.get("scheduled_at"):
@@ -1449,64 +906,153 @@ async def connection_details(
 
 # ==================== Admin Endpoints ====================
 
-@app.post("/api/admin/login", response_model=AdminLoginResponse)
-@limiter.limit("15/minute")
-async def admin_login(request: Request, body: AdminLoginRequest):
-    """
-    Admin authentication endpoint. Rate limited to 15/minute per IP.
-    """
-    try:
-        admin_user = admin_service.authenticate(body.username, body.password)
-
-        if admin_user:
-            token = admin_service.generate_token()
-            logger.info(f"[API] Admin login successful: {body.username}")
-            return AdminLoginResponse(success=True, token=token)
-        else:
-            logger.warning(f"[API] Admin login failed: {body.username}")
-            return AdminLoginResponse(success=False, error="Invalid credentials")
-    except Exception as e:
-        logger.error(f"[API] Admin login error: {str(e)}", exc_info=True)
-        return AdminLoginResponse(success=False, error=str(e))
-
-
 @app.get("/api/admin/job-description", response_model=JobDescriptionResponse)
 async def get_job_description(current_admin: dict = Depends(get_current_admin)):
     """
-    Get current job description from database.
+    Get current job description / system instructions from database.
     Requires admin authentication.
     """
     try:
-        jd_data = jd_service.get_job_description()
-        return JobDescriptionResponse(**jd_data)
+        data = system_instructions_service.get_system_instructions()
+        return JobDescriptionResponse(context=data.get("instructions", ""))
     except Exception as e:
-        logger.error(f"[API] Error fetching job description: {str(e)}", exc_info=True)
+        logger.error(f"[API] Error fetching system instructions: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch job description: {str(e)}"
+            detail=f"Failed to fetch system instructions: {str(e)}"
         )
 
 
 @app.put("/api/admin/job-description", response_model=JobDescriptionResponse)
 async def update_job_description(jd: JobDescriptionRequest, current_admin: dict = Depends(get_current_admin)):
     """
-    Update job description in database.
+    Update job description / system instructions in database.
     Requires admin authentication.
     """
     try:
         ctx_len = len(jd.context or "")
-        logger.info(f"[API] Updating job description (received context length={ctx_len})")
+        logger.info(f"[API] Updating system instructions (received length={ctx_len})")
         
-        # Save to database (single context field)
-        updated_jd = jd_service.update_job_description(context=jd.context)
+        # Save to database
+        updated = system_instructions_service.update_system_instructions(instructions=jd.context)
         
-        logger.info(f"[API] ✅ Job description saved to database (db={jd_service.db.name})")
-        return JobDescriptionResponse(**updated_jd)
+        logger.info(f"[API] ✅ System instructions saved to database")
+        return JobDescriptionResponse(context=updated.get("instructions", ""))
     except Exception as e:
-        logger.error(f"[API] Error updating job description: {str(e)}", exc_info=True)
+        logger.error(f"[API] Error updating system instructions: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update job description: {str(e)}"
+            detail=f"Failed to update system instructions: {str(e)}"
+        )
+
+
+@app.post("/api/admin/managers", response_model=ManagerResponse)
+async def enroll_manager(
+    request: ManagerRegistrationRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Enroll a new manager. Auto-generates a temporary password.
+    Requires admin authentication.
+    """
+    try:
+        logger.info(f"[API] Enrolling manager: {request.email}")
+        result = auth_service.register_manager(
+            name=request.name,
+            email=request.email,
+        )
+        return ManagerResponse(**result)
+    except Exception as e:
+        logger.error(f"[API] Error enrolling manager: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@app.get("/api/admin/managers", response_model=List[ManagerResponse])
+async def list_managers(current_admin: dict = Depends(get_current_admin)):
+    """
+    List all managers.
+    Requires admin authentication.
+    """
+    try:
+        client = get_supabase()
+        response = client.table("users").select("*").eq("role", "manager").order("created_at", desc=True).execute()
+        managers: List[ManagerResponse] = []
+        for m in (response.data or []):
+            managers.append(ManagerResponse(
+                id=m["id"],
+                username=m.get("username", ""),
+                email=m.get("email", ""),
+                name=m.get("name"),
+                role="manager",
+                created_at=m.get("created_at"),
+            ))
+        return managers
+    except Exception as e:
+        logger.error(f"[API] Error listing managers: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list managers: {str(e)}"
+        )
+
+
+@app.delete("/api/admin/managers/{manager_id}")
+async def delete_manager(manager_id: str, current_admin: dict = Depends(get_current_admin)):
+    """
+    Delete a manager by ID.
+    Requires admin authentication.
+    """
+    try:
+        client = get_supabase()
+        client.table("users").delete().eq("id", manager_id).eq("role", "manager").execute()
+        return {"success": True, "message": f"Manager {manager_id} deleted"}
+    except Exception as e:
+        logger.error(f"[API] Error deleting manager: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete manager: {str(e)}"
+        )
+
+
+@app.get("/api/admin/system-instructions", response_model=SystemInstructionsResponse)
+async def get_system_instructions(current_admin: dict = Depends(get_current_admin)):
+    """
+    Get current system instructions.
+    Requires admin authentication.
+    """
+    try:
+        data = system_instructions_service.get_system_instructions()
+        return SystemInstructionsResponse(instructions=data.get("instructions", ""))
+    except Exception as e:
+        logger.error(f"[API] Error fetching system instructions: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch system instructions: {str(e)}"
+        )
+
+
+@app.put("/api/admin/system-instructions", response_model=SystemInstructionsResponse)
+async def update_system_instructions(
+    request: SystemInstructionsRequest,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Update system instructions.
+    Requires admin authentication.
+    """
+    try:
+        updated = system_instructions_service.update_system_instructions(
+            instructions=request.instructions
+        )
+        logger.info(f"[API] ✅ System instructions updated (length={len(request.instructions)})")
+        return SystemInstructionsResponse(instructions=updated.get("instructions", ""))
+    except Exception as e:
+        logger.error(f"[API] Error updating system instructions: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update system instructions: {str(e)}"
         )
 
 
@@ -1721,40 +1267,31 @@ async def get_gemini_usage_report(
     Get all interviews with token usage for reporting.
     """
     try:
-        # Fetch all bookings with evaluation data (for token_usage)
-        pipeline = [
-            {"$sort": {"created_at": -1}},
-            {
-                "$lookup": {
-                    "from": "interview_evaluations",
-                    "localField": "token",
-                    "foreignField": "booking_token",
-                    "as": "evaluation"
-                }
-            },
-            {
-                "$addFields": {
-                    "token_usage": {"$arrayElemAt": ["$evaluation.token_usage", 0]}
-                }
-            }
-        ]
-        cursor = booking_service.col.aggregate(pipeline)
+        # Fetch all bookings from Supabase
+        # The interview_bookings table has a 'token_usage' column (JSONB)
+        bookings = booking_service.get_all_bookings()
         
         candidates = []
-        for doc in cursor:
-            booking = booking_service._doc_to_booking(doc)
-            if booking:
-                candidates.append(BookingResponse(
-                    token=booking.get('token', ''),
-                    name=booking.get('name', ''),
-                    email=booking.get('email', ''),
-                    phone=booking.get('phone', ''),
-                    scheduled_at=booking.get('scheduled_at', ''),
-                    created_at=booking.get('created_at', ''),
-                    application_text=booking.get('application_text'),
-                    application_url=booking.get('application_url'),
-                    token_usage=doc.get('token_usage'),
-                ))
+        for booking in bookings:
+            # Only include if token_usage is present (or return all?)
+            # The original aggregation was joining evaluations.
+            # If token_usage is stored in booking, we use that.
+            # If not, we might need to fetch evaluations separately, but let's rely on booking table for now
+            # as per schema definition in SUPABASE_SCHEMA.md
+            
+            candidates.append(BookingResponse(
+                token=booking.get('token', ''),
+                name=booking.get('name', ''),
+                email=booking.get('email', ''),
+                phone=booking.get('phone', ''),
+                scheduled_at=str(booking.get('scheduled_at', '')),
+                created_at=str(booking.get('created_at', '')),
+                application_text=booking.get('application_text'),
+                application_url=booking.get('application_url'),
+                token_usage=booking.get('token_usage'),
+                slot_id=booking.get('slot_id'),
+                application_form_submitted=booking.get('application_form_submitted')
+            ))
         
         return candidates
     except Exception as e:
@@ -1997,65 +1534,6 @@ async def get_application_by_token(token: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
         )
-
-
-# ==================== Enrolled Users Management Endpoints ====================
-
-class EnrollUserRequest(BaseModel):
-    name: str
-    email: EmailStr
-    phone: Optional[str] = None
-    notes: Optional[str] = None
-    slot_ids: List[str] = []  # List of slot IDs to assign to the user (min 10 slots in next 2 days)
-
-
-class UpdateUserRequest(BaseModel):
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class UserResponse(BaseModel):
-    id: str
-    name: str
-    email: str
-    phone: Optional[str] = None
-    status: str
-    notes: Optional[str] = None
-    created_at: str
-    updated_at: Optional[str] = None  # Optional for MongoDB docs that may not have it
-    email_sent: Optional[bool] = None  # True if email was sent successfully
-    email_error: Optional[str] = None  # Error message if email failed
-    temporary_password: Optional[str] = None  # Temporary password (for testing - remove in production)
-
-
-class InterviewSummary(BaseModel):
-    token: str
-    scheduled_at: str
-    status: str
-    overall_score: Optional[float] = None
-    overall_feedback: Optional[str] = None
-    evaluation_url: Optional[str] = None
-    interview_url: Optional[str] = None
-
-
-class UserDetailResponse(UserResponse):
-    interviews: List[InterviewSummary] = []
-
-
-class ScheduleInterviewForUserRequest(BaseModel):
-    user_id: str
-    slot_id: str  # ID of the interview slot to book
-
-
-class BulkScheduleInterviewResponse(BaseModel):
-    success: bool
-    total: int
-    successful: int
-    failed: int
-    errors: Optional[List[str]] = None
 
 
 @app.post("/api/admin/users", response_model=UserResponse)
@@ -2441,6 +1919,7 @@ async def get_all_users(
 async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin)):
     """
     Get an enrolled user by ID with full interview history.
+    Accessible to both admins and managers.
     """
     try:
         # 1. Fetch user profile
@@ -2452,7 +1931,24 @@ async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin
             )
         
         # 2. Fetch user bookings
+        # Primary: bookings linked by user_id.
+        # Fallback: bookings that match the user's email (older data may not have user_id populated).
         bookings = booking_service.get_user_bookings(user_id)
+        if not bookings:
+            user_email = (user.get("email") or "").strip()
+            if user_email:
+                bookings = booking_service.get_bookings_by_email(user_email)
+        else:
+            # Merge email-based bookings too (avoid duplicates) in case some rows missed user_id linkage.
+            user_email = (user.get("email") or "").strip()
+            if user_email:
+                email_bookings = booking_service.get_bookings_by_email(user_email)
+                seen_tokens = {b.get("token") for b in bookings if b.get("token")}
+                for b in email_bookings:
+                    t = b.get("token")
+                    if t and t not in seen_tokens:
+                        bookings.append(b)
+                        seen_tokens.add(t)
         
         # 3. Fetch evaluations for those bookings
         booking_tokens = [b["token"] for b in bookings]
@@ -2476,11 +1972,26 @@ async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin
             )
             interviews.append(summary)
             
-        # 5. Return detailed response
+        # 5. Compute aggregated overall analysis (best-effort)
+        overall_analysis = None
+        try:
+            analytics = evaluation_service.get_student_analytics(booking_tokens)
+            overall_analysis = analytics.get("overall_analysis")
+            # Fallback: most recent evaluation overall_feedback
+            if not overall_analysis:
+                scored_evals = [e for e in evaluations if e.get("overall_feedback")]
+                scored_evals.sort(key=lambda x: x.get("created_at", ""))
+                if scored_evals:
+                    overall_analysis = scored_evals[-1].get("overall_feedback")
+        except Exception as e:
+            logger.warning(f"[API] Could not compute overall analysis for user {user_id}: {e}")
+
+        # 6. Return detailed response
         user_response = UserResponse(**user)
         return UserDetailResponse(
             **user_response.dict(),
-            interviews=interviews
+            interviews=interviews,
+            overall_analysis=overall_analysis,
         )
             
     except HTTPException:
@@ -2574,13 +2085,7 @@ async def delete_user(user_id: str, current_admin: dict = Depends(get_current_ad
         except Exception as e:
             logger.warning(f"[API] Could not delete assignments for user {user_id}: {e}")
 
-        # 6. Delete application form for this user
-        try:
-            application_form_service.delete_form_by_user_id(user_id)
-        except Exception as e:
-            logger.warning(f"[API] Could not delete application form for user {user_id}: {e}")
-
-        # 7. Delete enrolled user record
+        # 6. Delete enrolled user record
         success = user_service.delete_user(user_id)
         if not success:
             raise HTTPException(
@@ -2695,7 +2200,11 @@ async def schedule_interview_for_user(
         
         # Create booking with slot_id reference
         try:
-            logger.info(f"[API] Creating booking for user_id: {request.user_id}, email: {user['email']}, slot_id: {request.slot_id}")
+            # Resolve actual user_id from users table (if registered) to avoid FK violation
+            # interview_bookings.user_id references users.id, but request.user_id is from enrolled_users
+            auth_user = auth_service.get_user_by_email(user['email'])
+            booking_user_id = auth_user['id'] if auth_user else None
+            
             token = booking_service.create_booking(
                 name=user['name'],
                 email=user['email'],
@@ -2704,7 +2213,8 @@ async def schedule_interview_for_user(
                 application_text=None,
                 application_url=None,
                 slot_id=request.slot_id,
-                user_id=request.user_id,  # CRITICAL: Link booking to enrolled_user
+                user_id=booking_user_id,
+                prompt=request.prompt,
             )
             logger.info(f"[API] ✅ Booking created successfully: token={token}, user_id={request.user_id}")
         except Exception as e:
@@ -2862,6 +2372,11 @@ async def bulk_schedule_interviews(
                     raise ValueError(f"Scheduled time must be in the future (Time in IST: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S')})")
                 
                 # Create booking
+                # Resolve actual user_id from users table (if registered) to avoid FK violation
+                # interview_bookings.user_id references users.id, but user['id'] is from enrolled_users
+                auth_user = auth_service.get_user_by_email(user['email'])
+                booking_user_id = auth_user['id'] if auth_user else None
+                
                 token = booking_service.create_booking(
                     name=user['name'],
                     email=user['email'],
@@ -2869,7 +2384,7 @@ async def bulk_schedule_interviews(
                     phone=user.get('phone', ''),
                     application_text=None,
                     application_url=None,
-                    user_id=user_id,
+                    user_id=booking_user_id,
                     slot_id=None, # Bulk scheduling creates direct bookings without specific pre-allocated slots
                 )
                 
@@ -2937,37 +2452,6 @@ async def bulk_schedule_interviews(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
         )
-
-
-# ==================== Interview Slots Management Endpoints ====================
-
-class CreateSlotRequest(BaseModel):
-    slot_datetime: str  # ISO format datetime string
-    max_capacity: int = 30  # Default 30, but admin can change
-    duration_minutes: int = 45  # Interview duration in minutes (default 45)
-    notes: Optional[str] = None
-
-
-class UpdateSlotRequest(BaseModel):
-    slot_datetime: Optional[str] = None
-    max_capacity: Optional[int] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class SlotResponse(BaseModel):
-    id: str
-    slot_datetime: str
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    duration_minutes: Optional[int] = None  # Interview duration in minutes
-    max_capacity: int
-    current_bookings: int
-    status: str
-    notes: Optional[str] = None
-    created_at: str
-    updated_at: Optional[str] = None  # Optional for MongoDB docs that may not have it
-    created_by: Optional[str] = None
 
 
 @app.post("/api/admin/slots", response_model=SlotResponse)
@@ -3202,22 +2686,6 @@ async def get_available_slots():
         )
 
 
-class CreateDaySlotsRequest(BaseModel):
-    date: str  # Date in YYYY-MM-DD format
-    start_time: str  # Time in HH:MM format (24-hour)
-    end_time: str  # Time in HH:MM format (24-hour)
-    interval_minutes: int = 45  # Minutes between slots
-    max_capacity: int = 30  # Capacity for each slot
-    notes: Optional[str] = None
-
-
-class CreateDaySlotsResponse(BaseModel):
-    success: bool
-    created_count: int
-    slots: List[SlotResponse]
-    errors: Optional[List[str]] = None
-
-
 @app.post("/api/admin/slots/create-day", response_model=CreateDaySlotsResponse)
 async def create_day_slots(
     request: CreateDaySlotsRequest,
@@ -3349,567 +2817,53 @@ async def create_day_slots(
         )
 
 
-# ==================== Student Application Form Endpoints ====================
-
-class ApplicationFormSubmitRequest(BaseModel):
-    # Personal Details
-    full_name: str
-    post: Optional[str] = None
-    category: Optional[str] = None
-    date_of_birth: Optional[str] = None
-    gender: Optional[str] = None
-    marital_status: Optional[str] = None
-    aadhaar_number: Optional[str] = None
-    pan_number: Optional[str] = None
-    father_name: Optional[str] = None
-    mother_name: Optional[str] = None
-    spouse_name: Optional[str] = None
-    
-    # Address (optional - can be uploaded via PDF)
-    correspondence_address1: Optional[str] = None
-    correspondence_address2: Optional[str] = None
-    correspondence_address3: Optional[str] = None
-    correspondence_state: Optional[str] = None
-    correspondence_district: Optional[str] = None
-    correspondence_pincode: Optional[str] = None
-    permanent_address1: Optional[str] = None
-    permanent_address2: Optional[str] = None
-    permanent_address3: Optional[str] = None
-    permanent_state: Optional[str] = None
-    permanent_district: Optional[str] = None
-    permanent_pincode: Optional[str] = None
-    
-    # Educational Qualification
-    ssc_board: Optional[str] = None
-    ssc_passing_date: Optional[str] = None
-    ssc_percentage: Optional[str] = None
-    ssc_class: Optional[str] = None
-    graduation_degree: Optional[str] = None
-    graduation_college: Optional[str] = None
-    graduation_specialization: Optional[str] = None
-    graduation_passing_date: Optional[str] = None
-    graduation_percentage: Optional[str] = None
-    graduation_class: Optional[str] = None
-    
-    # Other Details
-    religion: Optional[str] = None
-    religious_minority: bool = False
-    local_language_studied: bool = False
-    local_language_name: Optional[str] = None
-    computer_knowledge: bool = False
-    computer_knowledge_details: Optional[str] = None
-    languages_known: Optional[Dict[str, Dict[str, bool]]] = None
-    
-    # Application Specific
-    state_applying_for: Optional[str] = None
-    regional_rural_bank: Optional[str] = None
-    exam_center_preference1: Optional[str] = None
-    exam_center_preference2: Optional[str] = None
-    medium_of_paper: Optional[str] = None
-    
-    # For PDF upload
-    application_file_url: Optional[str] = None
-    application_text: Optional[str] = None
-    extracted_json_url: Optional[str] = None
+# ==================== Student Application / Interview Management Endpoints ====================
 
 
-class ApplicationFormResponse(BaseModel):
-    id: str
-    user_id: str
-    status: str
-    submitted_at: Optional[str] = None
-    created_at: str
-    updated_at: str
-    
-    # Personal Details
-    full_name: str
-    post: Optional[str] = None
-    category: Optional[str] = None
-    date_of_birth: Optional[str] = None
-    gender: Optional[str] = None
-    marital_status: Optional[str] = None
-    aadhaar_number: Optional[str] = None
-    pan_number: Optional[str] = None
-    father_name: Optional[str] = None
-    mother_name: Optional[str] = None
-    spouse_name: Optional[str] = None
-    
-    # Address
-    correspondence_address1: Optional[str] = None
-    correspondence_address2: Optional[str] = None
-    correspondence_address3: Optional[str] = None
-    correspondence_state: Optional[str] = None
-    correspondence_district: Optional[str] = None
-    correspondence_pincode: Optional[str] = None
-    permanent_address1: Optional[str] = None
-    permanent_address2: Optional[str] = None
-    permanent_address3: Optional[str] = None
-    permanent_state: Optional[str] = None
-    permanent_district: Optional[str] = None
-    permanent_pincode: Optional[str] = None
-    
-    # Educational Qualification
-    ssc_board: Optional[str] = None
-    ssc_passing_date: Optional[str] = None
-    ssc_percentage: Optional[str] = None
-    ssc_class: Optional[str] = None
-    graduation_degree: Optional[str] = None
-    graduation_college: Optional[str] = None
-    graduation_specialization: Optional[str] = None
-    graduation_passing_date: Optional[str] = None
-    graduation_percentage: Optional[str] = None
-    graduation_class: Optional[str] = None
-    
-    # Other Details
-    religion: Optional[str] = None
-    religious_minority: bool = False
-    local_language_studied: bool = False
-    local_language_name: Optional[str] = None
-    computer_knowledge: bool = False
-    computer_knowledge_details: Optional[str] = None
-    languages_known: Optional[Dict[str, Dict[str, bool]]] = None
-    
-    # Application Specific
-    state_applying_for: Optional[str] = None
-    regional_rural_bank: Optional[str] = None
-    exam_center_preference1: Optional[str] = None
-    exam_center_preference2: Optional[str] = None
-    medium_of_paper: Optional[str] = None
-    
-    # For PDF upload
-    application_file_url: Optional[str] = None
-    application_text: Optional[str] = None
-    extracted_json_url: Optional[str] = None
-
-
-@app.get("/api/student/application-form", response_model=Optional[ApplicationFormResponse])
-async def get_application_form(current_student: dict = Depends(get_current_student)):
+@app.get("/api/student/application-form")
+async def get_application_form_compat():
     """
-    Get student's application form status.
-    """
-    try:
-        student_email = current_student['email']
-        enrolled_user = user_service.get_user_by_email(student_email)
-        
-        if not enrolled_user:
-            return None
-        
-        form = application_form_service.get_form_by_user_id(enrolled_user['id'])
-        if form:
-            return ApplicationFormResponse(**form)
-        return None
-        
-    except Exception as e:
-        error_msg = f"Failed to fetch application form: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
+    Backwards-compatibility shim for legacy application-form endpoint.
 
-
-@app.post("/api/student/application-form/submit", response_model=ApplicationFormResponse)
-async def submit_application_form(
-    request: ApplicationFormSubmitRequest,
-    current_student: dict = Depends(get_current_student)
-):
+    The dedicated student application form feature has been removed in favor of
+    simple resume upload, but some frontend code still calls this endpoint.
+    We return `null` instead of 404 so the UI can treat it as "no form data".
     """
-    Submit or update student application form.
-    """
-    try:
-        student_email = current_student['email']
-        enrolled_user = user_service.get_user_by_email(student_email)
-        
-        if not enrolled_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found in enrolled users. Please contact administrator."
-            )
-        
-        # Prepare form data (convert snake_case to match database column names)
-        # Store ALL fields directly as database columns (not nested in 'data' field)
-        form_data = {
-            # Personal Details
-            'full_name': request.full_name,
-            'post': request.post,
-            'category': request.category,
-            'date_of_birth': request.date_of_birth,
-            'gender': request.gender,
-            'marital_status': request.marital_status,
-            'aadhaar_number': request.aadhaar_number,
-            'pan_number': request.pan_number,
-            'father_name': request.father_name,
-            'mother_name': request.mother_name,
-            'spouse_name': request.spouse_name,
-            
-            # Address Details
-            'correspondence_address1': request.correspondence_address1,
-            'correspondence_address2': request.correspondence_address2,
-            'correspondence_address3': request.correspondence_address3,
-            'correspondence_state': request.correspondence_state,
-            'correspondence_district': request.correspondence_district,
-            'correspondence_pincode': request.correspondence_pincode,
-            'permanent_address1': request.permanent_address1,
-            'permanent_address2': request.permanent_address2,
-            'permanent_address3': request.permanent_address3,
-            'permanent_state': request.permanent_state,
-            'permanent_district': request.permanent_district,  # FIXED: Was missing!
-            'permanent_pincode': request.permanent_pincode,
-            
-            # Contact Details (from enrolled user)
-            'email': student_email,  # From authenticated student
-            'mobile_number': enrolled_user.get('phone'),  # From enrolled user record
-            'alternative_number': None,  # Can be added to request model if needed
-            
-            # Educational Qualification
-            'ssc_board': request.ssc_board,
-            'ssc_passing_date': request.ssc_passing_date,
-            'ssc_percentage': request.ssc_percentage,
-            'ssc_class': request.ssc_class,
-            'graduation_degree': request.graduation_degree,
-            'graduation_college': request.graduation_college,
-            'graduation_specialization': request.graduation_specialization,
-            'graduation_passing_date': request.graduation_passing_date,
-            'graduation_percentage': request.graduation_percentage,
-            'graduation_class': request.graduation_class,
-            
-            # Other Details
-            'religion': request.religion,
-            'religious_minority': request.religious_minority,
-            'local_language_studied': request.local_language_studied,
-            'local_language_name': request.local_language_name,
-            'computer_knowledge': request.computer_knowledge,
-            'computer_knowledge_details': request.computer_knowledge_details,
-            'languages_known': request.languages_known,  # Stored as JSONB
-            
-            # Application Specific
-            'state_applying_for': request.state_applying_for,
-            'regional_rural_bank': request.regional_rural_bank,
-            'exam_center_preference1': request.exam_center_preference1,
-            'exam_center_preference2': request.exam_center_preference2,
-            'medium_of_paper': request.medium_of_paper,
-            
-            # File Upload
-            'application_file_url': request.application_file_url,
-            'application_text': request.application_text,
-        }
-        
-        # Convert date_of_birth string to DATE format if provided
-        if form_data.get('date_of_birth'):
-            try:
-                # Try to parse and format date string
-                date_str = form_data['date_of_birth']
-                # If it's already in YYYY-MM-DD format, keep it
-                # Otherwise try to parse common formats
-                if len(date_str) == 10 and date_str.count('-') == 2:
-                    # Already in correct format
-                    pass
-                else:
-                    # Try parsing other formats (DD/MM/YYYY, etc.)
-                    from datetime import datetime as dt
-                    # Try common formats
-                    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y']:
-                        try:
-                            parsed_date = dt.strptime(date_str, fmt)
-                            form_data['date_of_birth'] = parsed_date.strftime('%Y-%m-%d')
-                            break
-                        except ValueError:
-                            continue
-            except Exception as e:
-                logger.warning(f"Could not parse date_of_birth '{form_data.get('date_of_birth')}': {e}")
-        
-        # Remove None values (but keep False for boolean fields)
-        # Boolean fields should be stored even if False
-        boolean_fields = {'religious_minority', 'local_language_studied', 'computer_knowledge'}
-        form_data = {
-            k: v for k, v in form_data.items() 
-            if v is not None or k in boolean_fields
-        }
-        # Ensure boolean fields are explicitly set (False if not provided)
-        for bool_field in boolean_fields:
-            if bool_field not in form_data:
-                form_data[bool_field] = False
-        
-        # Create formatted application text for AI agent (if not already provided)
-        if not request.application_text:
-            # Format application form data as readable text for AI agent
-            application_text_parts = [
-                f"APPLICATION FORM - {request.full_name}",
-                "",
-                "PERSONAL DETAILS:",
-                f"Full Name: {request.full_name}",
-                f"Post: {request.post or 'N/A'}",
-                f"Category: {request.category or 'N/A'}",
-                f"Date of Birth: {request.date_of_birth or 'N/A'}",
-                f"Gender: {request.gender or 'N/A'}",
-                f"Marital Status: {request.marital_status or 'N/A'}",
-                f"Aadhaar Number: {request.aadhaar_number or 'N/A'}",
-                f"PAN Number: {request.pan_number or 'N/A'}",
-                f"Father's Name: {request.father_name or 'N/A'}",
-                f"Mother's Name: {request.mother_name or 'N/A'}",
-                f"Spouse's Name: {request.spouse_name or 'N/A'}" if request.spouse_name else "",
-                "",
-                "ADDRESS DETAILS:",
-                f"Correspondence Address: {request.correspondence_address1 or ''} {request.correspondence_address2 or ''} {request.correspondence_address3 or ''}",
-                f"Correspondence State: {request.correspondence_state or 'N/A'}, District: {request.correspondence_district or 'N/A'}, Pincode: {request.correspondence_pincode or 'N/A'}",
-                f"Permanent Address: {request.permanent_address1 or ''} {request.permanent_address2 or ''} {request.permanent_address3 or ''}",
-                f"Permanent State: {request.permanent_state or 'N/A'}, District: {request.permanent_district or 'N/A'}, Pincode: {request.permanent_pincode or 'N/A'}",
-                "",
-                "EDUCATIONAL QUALIFICATION:",
-                f"SSC Board: {request.ssc_board or 'N/A'}, Passing Date: {request.ssc_passing_date or 'N/A'}, Percentage: {request.ssc_percentage or 'N/A'}, Class: {request.ssc_class or 'N/A'}",
-                f"Graduation Degree: {request.graduation_degree or 'N/A'}, College: {request.graduation_college or 'N/A'}, Specialization: {request.graduation_specialization or 'N/A'}",
-                f"Graduation Passing Date: {request.graduation_passing_date or 'N/A'}, Percentage: {request.graduation_percentage or 'N/A'}, Class: {request.graduation_class or 'N/A'}",
-                "",
-                "OTHER DETAILS:",
-                f"Religion: {request.religion or 'N/A'}",
-                f"Religious Minority: {'Yes' if request.religious_minority else 'No'}",
-                f"Local Language Studied: {'Yes' if request.local_language_studied else 'No'} {f'({request.local_language_name})' if request.local_language_name else ''}",
-                f"Computer Knowledge: {'Yes' if request.computer_knowledge else 'No'} {request.computer_knowledge_details or ''}",
-                "",
-                "APPLICATION SPECIFIC:",
-                f"State Applying For: {request.state_applying_for or 'N/A'}",
-                f"Regional Rural Bank: {request.regional_rural_bank or 'N/A'}",
-                f"Exam Center Preferences: {request.exam_center_preference1 or 'N/A'}, {request.exam_center_preference2 or 'N/A'}",
-                f"Medium of Paper: {request.medium_of_paper or 'N/A'}",
-            ]
-            application_text = "\n".join([part for part in application_text_parts if part])
-            form_data['application_text'] = application_text
-        
-        # Save form as submitted
-        form = application_form_service.create_or_update_form(
-            enrolled_user['id'],
-            form_data,
-            status='submitted'
-        )
-        
-        logger.info(f"[API] ✅ Application form submitted for user {enrolled_user['id']}")
-        
-        return ApplicationFormResponse(**form)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Failed to submit application form: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
-        )
+    return None
 
 
 @app.post("/api/student/application-form/upload")
-async def upload_application_form(
-    file: UploadFile = File(...),
-    current_student: dict = Depends(get_current_student)
-):
+async def upload_application_form_compat(file: UploadFile = File(...)):
     """
-    Upload application form PDF and extract data.
+    Backwards-compatibility shim for legacy application-form PDF upload.
+
+    We no longer persist a structured application form; resume upload is handled
+    separately. This endpoint now just validates that a file was provided and
+    returns a success flag so existing frontend flows don't break.
     """
     try:
-        student_email = current_student['email']
-        enrolled_user = user_service.get_user_by_email(student_email)
-        
-        if not enrolled_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found in enrolled users."
-            )
-        
-        # Validate file
         if not file or not file.filename:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
+                detail="No file provided",
             )
-        
-        # Read file content
-        file_content = await file.read()
-        
-        # Validate file type and size (max 5MB, PDF/DOC/DOCX only)
-        try:
-            resume_service.validate_file(file_content, file.filename, file.content_type)
-        except ValueError as ve:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(ve)
-            )
-        
-        # Upload to storage
-        try:
-            application_url = booking_service.upload_application_to_storage(file_content, file.filename)
-        except Exception as e:
-            logger.error(f"[API] Failed to upload to storage: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to upload application: {str(e)}"
-            )
-        
-        # Extract text
-        application_text, extraction_error = resume_service.extract_text(
-            file_content, file.filename, file.content_type
-        )
-        
-        # Parse application data
-        parsed_data = {}
-        json_file_path = None
-        extracted_json_url = None
-        if application_text:
-            parsed_data = await resume_service.parse_application_data(application_text)
-            logger.info(f"[API] Parsed {len(parsed_data)} fields from PDF")
-            
-            # Save parsed data as JSON file to local folder AND GridFS
-            try:
-                # 1. Save locally for debugging (Disabled for production)
-                # json_file_path = resume_service.save_extracted_data_to_json(parsed_data, file.filename)
-                # logger.info(f"[API] 💾 Extracted data saved locally to: {json_file_path}")
-                
-                # 2. Upload to GridFS for frontend access
-                import json
-                json_content = json.dumps(parsed_data, indent=2).encode('utf-8')
-                json_filename = f"{file.filename.split('.')[0]}_extracted.json"
-                extracted_json_url = booking_service.upload_application_to_storage(json_content, json_filename)
-                logger.info(f"[API] ☁️ Extracted data uploaded to GridFS: {extracted_json_url}")
-            except Exception as e:
-                logger.error(f"[API] Failed to save extracted JSON: {str(e)}")
-        
-        # Map parsed data to match database schema (same as manual form)
-        # This ensures consistency between manual form and PDF upload
-        form_data = {
-            # Personal Details - from parsed data or enrolled user
-            'full_name': parsed_data.get('full_name') or parsed_data.get('name') or enrolled_user.get('name', ''),
-            'post': parsed_data.get('post'),
-            'category': parsed_data.get('category'),
-            'date_of_birth': parsed_data.get('date_of_birth') or parsed_data.get('dob'),
-            'gender': parsed_data.get('gender'),
-            'marital_status': parsed_data.get('marital_status'),
-            'aadhaar_number': parsed_data.get('aadhaar_number') or parsed_data.get('aadhaar'),
-            'pan_number': parsed_data.get('pan_number') or parsed_data.get('pan'),
-            'father_name': parsed_data.get('father_name') or parsed_data.get('father'),
-            'mother_name': parsed_data.get('mother_name') or parsed_data.get('mother'),
-            'spouse_name': parsed_data.get('spouse_name') or parsed_data.get('spouse'),
-            
-            # Address Details
-            'correspondence_address1': parsed_data.get('correspondence_address1') or parsed_data.get('correspondence_address'),
-            'correspondence_address2': parsed_data.get('correspondence_address2'),
-            'correspondence_address3': parsed_data.get('correspondence_address3'),
-            'correspondence_state': parsed_data.get('correspondence_state'),
-            'correspondence_district': parsed_data.get('correspondence_district'),
-            'correspondence_pincode': parsed_data.get('correspondence_pincode') or parsed_data.get('correspondence_pin'),
-            'permanent_address1': parsed_data.get('permanent_address1') or parsed_data.get('permanent_address'),
-            'permanent_address2': parsed_data.get('permanent_address2'),
-            'permanent_address3': parsed_data.get('permanent_address3'),
-            'permanent_state': parsed_data.get('permanent_state'),
-            'permanent_district': parsed_data.get('permanent_district'),  # Ensure this is included
-            'permanent_pincode': parsed_data.get('permanent_pincode') or parsed_data.get('permanent_pin'),
-            
-            # Contact Details (from enrolled user - consistent with manual form)
-            'email': student_email,
-            'mobile_number': parsed_data.get('mobile_number') or parsed_data.get('phone') or parsed_data.get('mobile') or enrolled_user.get('phone'),
-            'alternative_number': parsed_data.get('alternative_number') or parsed_data.get('alternate_phone'),
-            
-            # Educational Qualification
-            'ssc_board': parsed_data.get('ssc_board'),
-            'ssc_passing_date': parsed_data.get('ssc_passing_date'),
-            'ssc_percentage': parsed_data.get('ssc_percentage'),
-            'ssc_class': parsed_data.get('ssc_class'),
-            'graduation_degree': parsed_data.get('graduation_degree') or parsed_data.get('degree'),
-            'graduation_college': parsed_data.get('graduation_college') or parsed_data.get('college'),
-            'graduation_specialization': parsed_data.get('graduation_specialization') or parsed_data.get('specialization'),
-            'graduation_passing_date': parsed_data.get('graduation_passing_date'),
-            'graduation_percentage': parsed_data.get('graduation_percentage'),
-            'graduation_class': parsed_data.get('graduation_class'),
-            
-            # Other Details
-            'religion': parsed_data.get('religion'),
-            'religious_minority': parsed_data.get('religious_minority', False),
-            'local_language_studied': parsed_data.get('local_language_studied', False),
-            'local_language_name': parsed_data.get('local_language_name'),
-            'computer_knowledge': parsed_data.get('computer_knowledge', False),
-            'computer_knowledge_details': parsed_data.get('computer_knowledge_details'),
-            'languages_known': parsed_data.get('languages_known'),
-            
-            # Application Specific
-            'state_applying_for': parsed_data.get('state_applying_for') or parsed_data.get('state'),
-            'regional_rural_bank': parsed_data.get('regional_rural_bank') or parsed_data.get('rrb'),
-            'exam_center_preference1': parsed_data.get('exam_center_preference1'),
-            'exam_center_preference2': parsed_data.get('exam_center_preference2'),
-            'medium_of_paper': parsed_data.get('medium_of_paper'),
-            
-            # File Upload
-            'application_file_url': application_url,
-            'application_text': application_text if application_text else None,
-            'extracted_json_url': extracted_json_url,
-        }
-        
-        # Convert date_of_birth string to DATE format if provided (same as manual form)
-        if form_data.get('date_of_birth'):
-            try:
-                date_str = form_data['date_of_birth']
-                if len(date_str) == 10 and date_str.count('-') == 2:
-                    pass  # Already in correct format
-                else:
-                    from datetime import datetime as dt
-                    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y']:
-                        try:
-                            parsed_date = dt.strptime(date_str, fmt)
-                            form_data['date_of_birth'] = parsed_date.strftime('%Y-%m-%d')
-                            break
-                        except ValueError:
-                            continue
-            except Exception as e:
-                logger.warning(f"Could not parse date_of_birth '{form_data.get('date_of_birth')}': {e}")
-        
-        # Remove None values (but keep False for boolean fields - same as manual form)
-        boolean_fields = {'religious_minority', 'local_language_studied', 'computer_knowledge'}
-        form_data = {
-            k: v for k, v in form_data.items() 
-            if v is not None or k in boolean_fields
-        }
-        # Ensure boolean fields are explicitly set
-        for bool_field in boolean_fields:
-            if bool_field not in form_data:
-                form_data[bool_field] = False
-        
-        # Save as 'submitted' so user can proceed directly (student requested)
-        form = application_form_service.create_or_update_form(
-            enrolled_user['id'],
-            form_data,
-            status='submitted'
-        )
-        
-        logger.info(f"[API] ✅ Application form uploaded & parsed for user {enrolled_user['id']}")
-        
+
+        # Read the file once to consume the upload; result is ignored.
+        await file.read()
+
         return {
-            'success': True,
-            'form': ApplicationFormResponse(**form),
-            'extraction_error': extraction_error,
+            "success": True,
+            "form": None,
+            "extraction_error": None,
         }
-        
     except HTTPException:
         raise
     except Exception as e:
-        error_msg = f"Failed to upload application form: {str(e)}"
-        logger.error(f"[API] {error_msg}", exc_info=True)
+        logger.error(f"[API] Compatibility upload failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg
+            detail="Failed to process uploaded file.",
         )
-
-
-# ==================== Student Interview Management Endpoints ====================
-
-class AssignmentResponse(BaseModel):
-    id: str
-    user_id: str
-    slot_id: str
-    status: str
-    assigned_at: str
-    selected_at: Optional[str] = None
-    slot: SlotResponse
-
-
-class SelectSlotRequest(BaseModel):
-    assignment_id: str
 
 
 @app.get("/api/student/my-assignments", response_model=List[AssignmentResponse])
@@ -3919,18 +2873,8 @@ async def get_my_assignments(current_student: dict = Depends(get_current_student
     Returns only assigned (not yet selected) slots.
     """
     try:
-        # Get enrolled_user ID by email (student authentication uses students table, 
-        # but assignments are linked to enrolled_users table)
-        student_email = current_student['email']
-        enrolled_user = user_service.get_user_by_email(student_email)
-        
-        if not enrolled_user:
-            # No enrolled user found, return empty list
-            logger.warning(f"[API] No enrolled_user found for email {student_email}")
-            return []
-        
-        user_id = enrolled_user['id']
-        assignments = assignment_service.get_user_assignments(user_id, status='assigned')
+        student_id = current_student['id']
+        assignments = assignment_service.get_user_assignments(student_id, status='assigned')
         
         # Format response
         result = []
@@ -3969,215 +2913,108 @@ async def get_my_assignments(current_student: dict = Depends(get_current_student
 @app.post("/api/student/select-slot", response_model=ScheduleInterviewResponse)
 async def select_slot(
     request: SelectSlotRequest,
+    http_request: Request,
     current_student: dict = Depends(get_current_student)
 ):
     """
-    Select a slot from assigned slots. This creates a booking and cancels other assignments.
+    Select a slot for the authenticated student. 
+    Accepts slot_id and optional prompt. Creates a booking and cancel other assignments.
     """
     try:
-        # Get enrolled_user ID by email (student authentication uses students table, 
-        # but assignments are linked to enrolled_users table)
         student_email = current_student['email']
+        auth_user_id = current_student['id']
+        
+        # Get enrolled_user for fallback name/phone
         enrolled_user = user_service.get_user_by_email(student_email)
         
-        if not enrolled_user:
+        print("JWT USER:", auth_user_id)
+        slot_id = request.slot_id
+        prompt = request.prompt
+        
+        # 2. Check if application form is completed
+        application_form = application_form_service.get_form_by_user_id(auth_user_id)
+        if not application_form or application_form.get('status') != 'submitted':
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found in enrolled users. Please contact administrator."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please complete and submit your application form before selecting a slot."
             )
-        
-        user_id = enrolled_user['id']
-        
-        # Check if application form is completed
-        try:
-            application_form = application_form_service.get_form_by_user_id(user_id)
-            if not application_form or application_form.get('status') != 'submitted':
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Please complete and submit your application form before selecting a slot. Go to 'My Profile' or 'Apply for Job' section to fill/upload your application form."
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"[API] Failed to check application form: {str(e)}")
-            # Allow to continue if check fails (don't block on technical issues)
-        
-        # Get the assignment
-        assignment = None
-        if request.assignment_id.startswith('slot_'):
-            # This is a virtual assignment (direct slot selection)
-            slot_id = request.assignment_id.replace('slot_', '')
-            logger.info(f"[API] Student {user_id} selecting slot directly: {slot_id}")
+
+        # 3. Get slot details and verify availability
+        slot = slot_service.get_slot(slot_id)
+        if not slot:
+            raise HTTPException(status_code=404, detail="Slot not found")
             
-            # Create a new assignment for this user/slot
+        if slot['status'] != 'active':
+            raise HTTPException(status_code=400, detail="Slot is not available")
+            
+        if slot['current_bookings'] >= slot['max_capacity']:
+            raise HTTPException(status_code=400, detail="Slot is full")
+
+        # 4. Check for existing assignment for this slot
+        assignments = assignment_service.get_user_assignments(auth_user_id, status='assigned')
+        assignment = next((a for a in assignments if a['slot_id'] == slot_id), None)
+        
+        # If no assignment exists but slot is public/available, we can create one or allow it?
+        # Current logic seems to prefer assignments. If none found, we'll try to create a virtual one.
+        if not assignment:
+            logger.info(f"[API] Student {auth_user_id} selecting slot directly: {slot_id}")
             try:
-                new_assignments = assignment_service.assign_slots_to_user(user_id, [slot_id])
+                new_assignments = assignment_service.assign_slots_to_user(auth_user_id, [slot_id])
                 if new_assignments:
                     assignment = new_assignments[0]
-                    # Fetch slot details since it's missing from the raw insert result
-                    slot_details = slot_service.get_slot(slot_id)
-                    assignment['interview_slots'] = slot_details
-                    logger.info(f"[API] Created assignment {assignment['id']} with slot details")
                 else:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to create slot assignment"
-                    )
+                    raise HTTPException(status_code=500, detail="Failed to create slot assignment")
             except Exception as e:
                 logger.error(f"[API] Failed to create assignment: {str(e)}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create slot assignment: {str(e)}"
-                )
-        else:
-            # Regular assignment
-            assignments = assignment_service.get_user_assignments(user_id, status='assigned')
-            assignment = next((a for a in assignments if a['id'] == request.assignment_id), None)
-        
-        if not assignment:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Assignment not found or already selected"
-            )
-        
-        # Get slot details
-        slot_data = assignment.get('interview_slots')
-        if not slot_data:
-            logger.error(f"[API] Slot details missing for assignment {assignment.get('id')}, slot_id: {assignment.get('slot_id')}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Slot details not found for assignment {assignment.get('id')}"
-            )
-        
-        # Handle nested slot data
-        if isinstance(slot_data, dict):
-            slot = slot_data
-        elif isinstance(slot_data, list) and len(slot_data) > 0:
-            slot = slot_data[0]
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Invalid slot data"
-            )
-        
-        # Check slot availability
-        if slot['status'] != 'active':
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Slot is not available. Status: {slot['status']}"
-            )
-        
-        if slot['current_bookings'] >= slot['max_capacity']:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Slot is full"
-            )
-        
-        # Parse slot datetime
-        try:
-            slot_datetime_str = slot.get('slot_datetime') or slot.get('start_time')
-            if not slot_datetime_str:
-                raise ValueError("No start time found for slot")
-                
-            # Use parse_datetime_safe to handle both UTC and IST formats
-            scheduled_at = parse_datetime_safe(slot_datetime_str)
-            logger.info(f"[API] Parsed slot datetime for booking: {slot_datetime_str} -> {scheduled_at.isoformat()} (IST)")
-        except (ValueError, KeyError, TypeError) as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Invalid slot datetime: {str(e)}"
-            )
-        
-        # Get user details
-        user = user_service.get_user(user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        # Create booking
-        try:
-            application_form = application_form_service.get_form_by_user_id(user_id)
-            token = booking_service.create_booking(
-                name=user['name'],
-                email=user['email'],
-                scheduled_at=scheduled_at,
-                phone=user.get('phone', ''),
-                application_text=application_form.get('application_text') if application_form else None,
-                application_url=None,
-                slot_id=slot['id'],
-                user_id=user_id,
-                assignment_id=assignment['id'],
-                application_form_id=application_form.get('id') if application_form else None,
-            )
-        except Exception as e:
-            logger.error(f"[API] Failed to create booking: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create booking: {str(e)}"
-            )
-        
-        # Mark assignment as selected
-        try:
-            assignment_service.select_slot_for_user(user_id, assignment['id'])
-        except Exception as e:
-            logger.warning(f"[API] Failed to update assignment: {str(e)}")
-        
-        # Cancel other assignments
-        try:
-            assignment_service.cancel_other_assignments(user_id, assignment['id'])
-        except Exception as e:
-            logger.warning(f"[API] Failed to cancel other assignments: {str(e)}")
-        
-        # Increment slot booking count
-        try:
-            slot_service.increment_booking_count(slot['id'])
-        except Exception as e:
-            logger.warning(f"[API] Failed to increment slot count: {str(e)}")
-        
-        # Update user interview status
-        try:
-            user_service.update_user(user_id, interview_status='slot_selected')
-        except Exception as e:
-            logger.warning(f"[API] Failed to update user status: {str(e)}")
-        
-        # Generate interview URL - use request origin dynamically
-        # http_request is a function parameter (line 615: async def schedule_interview(..., http_request: Request))
-        base_url = get_frontend_url(http_request)  # type: ignore[possibly-undefined]
+                raise HTTPException(status_code=500, detail="Failed to create slot assignment")
+
+        # 5. Parse slot datetime
+        slot_datetime_str = slot.get('slot_datetime') or slot.get('start_time')
+        scheduled_at = parse_datetime_safe(slot_datetime_str)
+
+        # 6. Create booking
+        token = booking_service.create_booking(
+            name=current_student.get('name', enrolled_user.get('name', 'Student')),
+            email=student_email,
+            scheduled_at=scheduled_at,
+            phone=current_student.get('phone', enrolled_user.get('phone', '')),
+            application_text=application_form.get('application_text') if application_form else None,
+            application_url=None,
+            slot_id=slot_id,
+            user_id=auth_user_id, # Use Auth ID for the booking record
+            assignment_id=assignment['id'],
+            application_form_id=application_form.get('id') if application_form else None,
+            prompt=prompt # Include the prompt from the request
+        )
+
+        # 7. Update status: mark assignment used, cancel others, increment count
+        assignment_service.select_slot_for_user(auth_user_id, assignment['id'])
+        assignment_service.cancel_other_assignments(auth_user_id, assignment['id'])
+        slot_service.increment_booking_count(slot_id)
+        user_service.update_user(auth_user_id, interview_status='slot_selected')
+
+        # 8. Generate interview URL and send email
+        base_url = get_frontend_url(http_request)
         interview_url = f"{base_url}/interview/{token}" if base_url else f"/interview/{token}"
         
-        # Send email in background
         async def send_email_bg():
             try:
-                success, error_msg = await asyncio.wait_for(
-                    email_service.send_interview_email(
-                        to_email=user['email'],
-                        name=user['name'],
-                        interview_url=interview_url,
-                        scheduled_at=scheduled_at,
-                    ),
-                    timeout=30.0
+                await email_service.send_interview_email(
+                    to_email=student_email,
+                    name=enrolled_user.get('name', 'Student'),
+                    interview_url=interview_url,
+                    scheduled_at=scheduled_at,
                 )
-                if success:
-                    logger.info(f"[API] ✅ Interview email sent to {user['email']}")
-                else:
-                    logger.warning(f"[API] ⚠️ Interview email failed: {error_msg}")
-            except asyncio.TimeoutError:
-                logger.warning(f"[API] ⚠️ Interview email timed out after 30s")
             except Exception as e:
-                logger.warning(f"[API] ⚠️ Interview email failed: {repr(e)}")
+                logger.warning(f"[API] ⚠️ Failed to send interview email: {e}")
         
         asyncio.create_task(send_email_bg())
-        await asyncio.sleep(0.1)
-        
-        logger.info(f"[API] ✅ User {user_id} selected slot: {interview_url}")
         
         return ScheduleInterviewResponse(
             ok=True,
             interviewUrl=interview_url,
-            emailSent=False,
-            emailError=None,
+            emailSent=True, # We've queued it
+            emailError=None
         )
         
     except HTTPException:
@@ -4190,22 +3027,16 @@ async def select_slot(
             detail=error_msg
         )
 
-
-class MyInterviewResponse(BaseModel):
-    upcoming: List[Dict[str, Any]] = []  # All upcoming interviews (scheduled by admin)
-    missed: List[Dict[str, Any]] = []  # Past interviews that were not attended/completed
-    completed: List[Dict[str, Any]] = []  # Past interviews that were completed
-
-
 @app.get("/api/student/my-interview", response_model=MyInterviewResponse)
 async def get_my_interview(http_request: Request, current_student: dict = Depends(get_current_student)):
     """
     Get student's interview status across all stages (enrolled/scheduled/completed).
     """
     try:
-        # Get enrolled_user ID by email (student authentication uses students table, 
-        # but assignments are linked to enrolled_users table)
+        student_id = current_student['id']
         student_email = current_student['email']
+        
+        # Get enrolled_user for legacy data fallback
         enrolled_user = user_service.get_user_by_email(student_email)
         
         # Get current time
@@ -4215,9 +3046,17 @@ async def get_my_interview(http_request: Request, current_student: dict = Depend
         logger.info(f"[API] Checking bookings by email: {student_email}")
         email_bookings = booking_service.get_bookings_by_email(student_email)
         logger.info(f"[API] Found {len(email_bookings)} bookings by email: {student_email}")
-        user_id = enrolled_user['id'] if enrolled_user else None
-        user_id_bookings = booking_service.get_bookings_by_user_id(user_id) if user_id else []
-        logger.info(f"[API] Found {len(user_id_bookings)} bookings by user_id: {user_id or 'N/A'}")
+        
+        # Use student_id (auth ID) as primary, but fallback to enrolled_user_id for legacy cleanup
+        user_id = student_id
+        legacy_user_id = enrolled_user['id'] if enrolled_user else None
+        
+        user_id_bookings = booking_service.get_bookings_by_user_id(user_id)
+        if legacy_user_id and legacy_user_id != user_id:
+            legacy_bookings = booking_service.get_bookings_by_user_id(legacy_user_id)
+            user_id_bookings.extend(legacy_bookings)
+            
+        logger.info(f"[API] Found {len(user_id_bookings)} total bookings by user IDs")
         seen_tokens = set()
         all_bookings_data = []
         for booking in email_bookings + user_id_bookings:
@@ -4403,6 +3242,43 @@ async def get_my_interview(http_request: Request, current_student: dict = Depend
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
+        )
+
+
+
+# ==================== Student Analytics Endpoints ====================
+
+@app.get("/api/student/analytics")
+async def get_student_analytics(current_student: dict = Depends(get_current_student)):
+    """
+    Get analytics and progress for the current logged-in student.
+    """
+    try:
+        user_id = current_student.get("id") or current_student.get("user_id")
+        email = current_student.get("email")
+        
+        # 1. Get all bookings for this student
+        # Try by user_id first (preferred for enrolled users)
+        bookings = []
+        if user_id:
+            bookings = booking_service.get_bookings_by_user_id(user_id)
+        
+        # If no bookings found by user_id, try by email (fallback for older bookings or pre-enrollment)
+        if not bookings and email:
+            bookings = booking_service.get_bookings_by_email(email)
+            
+        booking_tokens = [b["token"] for b in bookings if b.get("token")]
+        
+        # 2. Calculate analytics using the service
+        analytics = evaluation_service.get_student_analytics(booking_tokens)
+        
+        return analytics
+        
+    except Exception as e:
+        logger.error(f"[API] Error fetching student analytics: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch analytics: {str(e)}"
         )
 
 

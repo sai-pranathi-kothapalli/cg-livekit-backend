@@ -1,14 +1,15 @@
 """
 Slot Service
 
-Handles interview slot management with MongoDB.
+Handles interview slot management with Supabase.
 """
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import uuid
 
 from app.config import Config
-from app.db.mongo import get_database, doc_with_id, to_object_id
+from app.db.supabase import get_supabase
 from app.utils.logger import get_logger
 from app.utils.exceptions import AgentError
 from app.utils.datetime_utils import get_now_ist, to_ist
@@ -17,12 +18,68 @@ logger = get_logger(__name__)
 
 
 class SlotService:
-    """Service for managing interview slots using MongoDB"""
+    """Service for managing interview slots using Supabase"""
 
     def __init__(self, config: Config):
         self.config = config
-        self.db = get_database(config)
-        self.col = self.db["interview_slots"]
+        self.client = get_supabase()
+
+    def _map_to_frontend(self, slot: Dict[str, Any]) -> Dict[str, Any]:
+        """Map DB columns to frontend expected fields."""
+        if not slot:
+            return slot
+        # Map capacity -> max_capacity
+        if "capacity" in slot:
+            slot["max_capacity"] = slot["capacity"]
+        elif "max_capacity" not in slot:
+            slot["max_capacity"] = slot.get("max_bookings", 30)
+            
+        # Map booked_count -> current_bookings
+        if "booked_count" in slot:
+            slot["current_bookings"] = slot["booked_count"]
+        elif "current_bookings" not in slot:
+            slot["current_bookings"] = 0
+            
+        # Calculate duration if missing or from start/end
+        if "duration_minutes" in slot and slot["duration_minutes"] is not None:
+             pass # already have it
+        elif (slot.get("start_time") and slot.get("end_time")):
+            try:
+                st = datetime.fromisoformat(slot["start_time"].replace("Z", "+00:00"))
+                et = datetime.fromisoformat(slot["end_time"].replace("Z", "+00:00"))
+                slot["duration_minutes"] = int((et - st).total_seconds() / 60)
+            except Exception:
+                pass
+        
+        # ENSURE ALL DATETIMES ARE IST STRINGS FOR FRONTEND
+        # Supabase may return UTC strings even if we stored IST.
+        # We convert them here to ensure frontend always sees IST.
+        datetime_fields = ["slot_datetime", "start_time", "end_time", "created_at", "updated_at"]
+        for field in datetime_fields:
+            if field in slot and slot[field]:
+                try:
+                    # Parse (properly handling Z or offset) and convert to IST
+                    dt_str = slot[field]
+                    if isinstance(dt_str, str):
+                        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                        slot[field] = to_ist(dt).isoformat()
+                except (ValueError, TypeError):
+                    logger.warning(f"Failed to convert field {field} to IST: {slot[field]}")
+
+        # PROVIDE start_time AND end_time for frontend if missing
+        if "slot_datetime" in slot:
+            try:
+                dt = datetime.fromisoformat(slot["slot_datetime"].replace("Z", "+00:00"))
+                # slot["slot_datetime"] is already IST from loop above
+                slot["start_time"] = dt.isoformat()
+                if slot.get("duration_minutes"):
+                    from datetime import timedelta
+                    et = dt + timedelta(minutes=slot["duration_minutes"])
+                    slot["end_time"] = et.isoformat()
+            except Exception:
+                pass
+
+        return slot
 
     def create_slot(
         self,
@@ -37,27 +94,29 @@ class SlotService:
             end_time_ist = to_ist(end_time)
             if duration_minutes is None:
                 duration_minutes = int((end_time_ist - start_time_ist).total_seconds() / 60)
+            
             now_iso = get_now_ist().isoformat()
-            slot_data = {
+            
+            # Use DB column names for insert
+            # REMOVED: start_time, end_time (not in Supabase schema)
+            slot_data_db = {
+                "id": str(uuid.uuid4()),
                 "slot_datetime": start_time_ist.isoformat(),
-                "start_time": start_time_ist.isoformat(),
-                "end_time": end_time_ist.isoformat(),
                 "duration_minutes": duration_minutes,
-                "max_bookings": max_bookings,
-                "max_capacity": max_bookings,
-                "current_bookings": 0,
-                "is_booked": False,
-                "notes": notes,
+                "capacity": max_bookings,     # DB column: capacity
+                "booked_count": 0,            # DB column: booked_count
                 "status": "active",
+                "notes": notes,
                 "created_at": now_iso,
                 "updated_at": now_iso,
             }
-            r = self.col.insert_one(slot_data)
-            doc = self.col.find_one({"_id": r.inserted_id})
-            slot = doc_with_id(doc)
-            slot = self._convert_slot_to_ist(slot)
-            logger.info(f"[SlotService] Slot created: id={slot.get('id')}")
-            return slot
+            
+            response = self.client.table("slots").insert(slot_data_db).execute()
+            created_slot = response.data[0] if response.data else slot_data_db
+            
+            logger.info(f"[SlotService] Slot created: id={created_slot.get('id')}")
+            return self._map_to_frontend(created_slot)
+            
         except Exception as e:
             logger.error(f"Error creating slot: {e}")
             raise AgentError(f"Failed to create slot: {str(e)}", "SlotService")
@@ -65,56 +124,23 @@ class SlotService:
     def get_slot_by_datetime(self, slot_datetime_iso: str) -> Optional[Dict[str, Any]]:
         """Return an existing slot with the same slot_datetime (avoid duplicates)."""
         try:
-            doc = self.col.find_one({"slot_datetime": slot_datetime_iso})
-            if not doc:
+            response = self.client.table("slots").select("*").eq("slot_datetime", slot_datetime_iso).execute()
+            if not response.data:
                 return None
-            slot = doc_with_id(doc)
-            slot = self._convert_slot_to_ist(slot)
-            slot["max_capacity"] = slot.get("max_capacity") or slot.get("max_bookings")
-            return slot
+            return self._map_to_frontend(response.data[0])
         except Exception as e:
             logger.error(f"Error finding slot by datetime: {e}")
             return None
 
     def get_slot(self, slot_id: str) -> Optional[Dict[str, Any]]:
         try:
-            oid = to_object_id(slot_id)
-            doc = self.col.find_one({"_id": oid} if oid else {"id": slot_id})
-            if not doc:
+            response = self.client.table("slots").select("*").eq("id", slot_id).execute()
+            if not response.data:
                 return None
-            slot = doc_with_id(doc)
-            slot = self._convert_slot_to_ist(slot)
-            if not slot.get("duration_minutes") and (slot.get("start_time") and slot.get("end_time")):
-                try:
-                    st = datetime.fromisoformat(slot["start_time"].replace("Z", "+00:00"))
-                    et = datetime.fromisoformat(slot["end_time"].replace("Z", "+00:00"))
-                    slot["duration_minutes"] = int((et - st).total_seconds() / 60)
-                except Exception:
-                    pass
-            slot["max_capacity"] = slot.get("max_capacity") or slot.get("max_bookings")
-            return slot
+            return self._map_to_frontend(response.data[0])
         except Exception as e:
             logger.error(f"Error fetching slot: {e}")
             return None
-
-    def _convert_slot_to_ist(self, slot: Dict[str, Any]) -> Dict[str, Any]:
-        for field in ["slot_datetime", "start_time", "end_time", "created_at", "updated_at"]:
-            val = slot.get(field)
-            if val is None:
-                continue
-            if isinstance(val, datetime):
-                slot[field] = to_ist(val).isoformat()
-            elif isinstance(val, str):
-                try:
-                    dt_str = val
-                    if "Z" in dt_str or "+00:00" in dt_str:
-                        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                    else:
-                        dt = datetime.fromisoformat(dt_str)
-                    slot[field] = to_ist(dt).isoformat()
-                except (ValueError, TypeError):
-                    pass
-        return slot
 
     def get_all_slots(
         self,
@@ -122,22 +148,23 @@ class SlotService:
         include_past: bool = False,
     ) -> List[Dict[str, Any]]:
         try:
-            query = {}
+            query = self.client.table("slots").select("*")
+            
             if status:
-                query["status"] = status
+                query = query.eq("status", status)
+            
             if not include_past:
                 from datetime import timezone
                 now = datetime.now(timezone.utc).isoformat()
-                query["slot_datetime"] = {"$gte": now}
-            cursor = self.col.find(query).sort("slot_datetime", 1)
-            out = []
-            for doc in cursor:
-                slot = doc_with_id(doc)
-                slot = self._convert_slot_to_ist(slot)
-                slot["max_capacity"] = slot.get("max_capacity") or slot.get("max_bookings")
-                slot["duration_minutes"] = slot.get("duration_minutes") or 45
-                out.append(slot)
-            return out
+                query = query.gte("slot_datetime", now)
+            
+            query = query.order("slot_datetime", desc=False)
+            response = query.execute()
+            
+            slots = []
+            for slot in (response.data or []):
+                slots.append(self._map_to_frontend(slot))
+            return slots
         except Exception as e:
             logger.error(f"Error fetching slots: {e}")
             return []
@@ -147,22 +174,30 @@ class SlotService:
 
     def update_slot(self, slot_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            oid = to_object_id(slot_id)
-            q = {"_id": oid} if oid else {"id": slot_id}
-            self.col.update_one(q, {"$set": updates})
-            slot = self.get_slot(slot_id)
-            if not slot:
+            # Map frontend keys to DB keys if present in updates
+            if "max_capacity" in updates:
+                updates["capacity"] = updates.pop("max_capacity")
+            if "current_bookings" in updates:
+                updates["booked_count"] = updates.pop("current_bookings")
+            
+            # Remove keys not in schema
+            for key in ["start_time", "end_time", "max_bookings", "current_bookings", "max_capacity"]:
+                if key in updates:
+                    del updates[key]
+
+            updates["updated_at"] = get_now_ist().isoformat()
+            response = self.client.table("slots").update(updates).eq("id", slot_id).execute()
+            
+            if not response.data:
                 raise AgentError("Failed to update slot", "SlotService")
-            return slot
+            return self._map_to_frontend(response.data[0])
         except Exception as e:
             logger.error(f"Error updating slot: {e}")
             raise AgentError(f"Failed to update slot: {str(e)}", "SlotService")
 
     def delete_slot(self, slot_id: str) -> bool:
         try:
-            oid = to_object_id(slot_id)
-            q = {"_id": oid} if oid else {"id": slot_id}
-            self.col.delete_one(q)
+            self.client.table("slots").delete().eq("id", slot_id).execute()
             return True
         except Exception as e:
             logger.error(f"Error deleting slot: {e}")
@@ -170,29 +205,48 @@ class SlotService:
 
     def update_slot_status(self, slot_id: str, is_booked: bool) -> bool:
         try:
-            oid = to_object_id(slot_id)
-            q = {"_id": oid} if oid else {"id": slot_id}
-            r = self.col.update_one(q, {"$set": {"is_booked": is_booked}})
-            return r.matched_count > 0
+            # Note: 'is_booked' is not in schema explicitly as a boolean column? 
+            # Looking at schema: status TEXT DEFAULT 'available'. 
+            # Wait, create_slot used "status": "active". 
+            # Previous code had "is_booked": False in dict but not in schema table create script.
+            # Schema has: status TEXT.
+            # Let's assume we map boolean to status if needed, 
+            # OR if "status" is the only field, we update that.
+            # For now, let's update status='full' if booked?
+            
+            status = "full" if is_booked else "active"
+            response = self.client.table("slots").update({"status": status}).eq("id", slot_id).execute()
+            return bool(response.data)
         except Exception as e:
             logger.error(f"Error updating slot status: {e}")
             return False
 
     def increment_booking_count(self, slot_id: str) -> bool:
         try:
-            slot = self.get_slot(slot_id)
-            if not slot:
+            # Get current state
+            # We can't use self.get_slot because returns mapped dict
+            # Need raw DB data to be safe, or just use mapped and map back
+            response = self.client.table("slots").select("*").eq("id", slot_id).execute()
+            if not response.data:
                 return False
-            new_count = slot.get("current_bookings", 0) + 1
-            max_bookings = slot.get("max_bookings") or slot.get("max_capacity") or 1
-            is_booked = new_count >= max_bookings
-            oid = to_object_id(slot_id)
-            q = {"_id": oid} if oid else {"id": slot_id}
-            r = self.col.update_one(
-                q,
-                {"$set": {"current_bookings": new_count, "is_booked": is_booked}},
-            )
-            return r.matched_count > 0
+            
+            slot_db = response.data[0]
+            current_count = slot_db.get("booked_count", 0)
+            capacity = slot_db.get("capacity", 1)
+            
+            new_count = current_count + 1
+            
+            updates = {
+                "booked_count": new_count,
+                "updated_at": get_now_ist().isoformat()
+            }
+            
+            if new_count >= capacity:
+                updates["status"] = "full"
+            
+            response = self.client.table("slots").update(updates).eq("id", slot_id).execute()
+            
+            return bool(response.data)
         except Exception as e:
             logger.error(f"Error incrementing booking count: {e}")
             return False
