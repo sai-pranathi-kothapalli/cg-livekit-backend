@@ -9,26 +9,28 @@ from app.schemas.interviews import (
     ConnectionDetailsRequest,
     ConnectionDetailsResponse,
 )
-from app.api.main import (  # type: ignore
+from app.services.container import (
     booking_service,
     evaluation_service,
     transcript_storage_service,
     slot_service,
-    logger,
-    config,
-    get_optional_student,
-    get_current_student,
-    parse_datetime_safe,
-    get_now_ist,
-    livekit_api,
-    json,
-    random,
 )
+from app.utils.logger import get_logger
+from app.config import get_config
+from app.utils.auth_dependencies import get_current_student, get_optional_student
+from app.utils.datetime_utils import get_now_ist, parse_datetime_safe
+from livekit import api as livekit_api
+import json
+import random
 
-router = APIRouter()
+logger = get_logger(__name__)
+config = get_config()
+
+# Interview evaluation and LiveKit connection endpoints
+router = APIRouter(tags=["Interviews"])
 
 
-@router.get("/api/evaluation/{token}", response_model=EvaluationResponse)
+@router.get("/evaluation/{token}", response_model=EvaluationResponse)
 async def get_evaluation(token: str):
     """
     Get comprehensive evaluation data for an interview.
@@ -40,6 +42,7 @@ async def get_evaluation(token: str):
         # Get booking
         booking = booking_service.get_booking(token)
         if not booking:
+            logger.warning(f"[API] Get evaluation failed: Interview {token} not found")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Interview not found"
@@ -126,7 +129,7 @@ async def get_evaluation(token: str):
         )
 
 
-@router.post("/api/connection-details", response_model=ConnectionDetailsResponse)
+@router.post("/connection-details", response_model=ConnectionDetailsResponse)
 async def connection_details(
     request: ConnectionDetailsRequest,
     current_student: Optional[dict] = Depends(get_optional_student)
@@ -208,6 +211,7 @@ async def connection_details(
             try:
                 booking = booking_service.get_booking(request.token)
                 if not booking:
+                    logger.warning(f"[API] Connection details failed: Interview {request.token} not found")
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="Interview not found"
@@ -279,11 +283,12 @@ async def connection_details(
 
                     interview_end_time = scheduled_at + timedelta(minutes=duration_minutes)
 
-                    # Check if current time is before scheduled time
-                    if now < scheduled_at:
+                    # Check if current time is before scheduled time (with 15-minute grace period for early joining)
+                    grace_period = timedelta(minutes=15)
+                    if now < (scheduled_at - grace_period):
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Interview has not started yet. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                            detail=f"Interview has not started yet. You can join up to 15 minutes early. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
                         )
 
                     # Check if current time is after interview end time
@@ -320,19 +325,71 @@ async def connection_details(
         if booking_token:
             room_metadata_dict["booking_token"] = booking_token
             room_metadata_dict["token"] = booking_token
+
+        # Metadata dictionary for room (application_text + booking_token)
+
         room_metadata = json.dumps(room_metadata_dict) if room_metadata_dict else None
 
+        # [OK] Prepare LiveKitAPI to explicitly create/update the room
+        try:
+            # Convert wss:// to https:// for the API client
+            api_url = config.livekit.url.replace("wss://", "https://").replace("ws://", "http://")
+            
+            # Use LiveKitAPI (1.1.0 way)
+            async with livekit_api.LiveKitAPI(
+                api_url,
+                config.livekit.api_key,
+                config.livekit.api_secret
+            ) as lkapi:
+                # Explicitly create room (or update metadata) to trigger job dispatch
+                await lkapi.room.create_room(
+                    livekit_api.CreateRoomRequest(
+                        name=room_name,
+                        metadata=room_metadata or ""
+                    )
+                )
+
+                # [OK] Explicitly create agent dispatch to trigger job request ONLY if an agent isn't already there
+                try:
+                    # Check for existing agent participant to ensure idempotency
+                    participants_resp = await lkapi.room.list_participants(
+                        livekit_api.ListParticipantsRequest(room=room_name)
+                    )
+                    agent_exists = any(
+                        p.identity.startswith("agent-") 
+                        for p in participants_resp.participants
+                    )
+                    
+                    if agent_exists:
+                        logger.info(f"[API] 🤖 Agent already present in room '{room_name}'. Skipping duplicate dispatch.")
+                    else:
+                        await lkapi.agent_dispatch.create_dispatch(
+                            livekit_api.CreateAgentDispatchRequest(
+                                agent_name=agent_name,
+                                room=room_name,
+                                metadata=room_metadata or ""
+                            )
+                        )
+                        logger.info(f"[API] 🚀 Agent dispatch created for room '{room_name}' with agent '{agent_name}'")
+                except Exception as dispatch_e:
+                    logger.warning(f"[API] ⚠️ Failed to check participants or create explicit agent dispatch: {dispatch_e}")
+
+            logger.info(f"[API] 🏠 Room '{room_name}' prepared with metadata and dispatch requested")
+        except Exception as e:
+            logger.warning(f"[API] ⚠️ Failed to explicitly create/update room metadata: {e}")
+            logger.info("   (Token-level metadata will still be sent as fallback)")
+
         # Create LiveKit AccessToken
-        token = livekit_api.AccessToken(
-            config.livekit.api_key,
-            config.livekit.api_secret
-        )
-        token.identity = participant_identity
-        token.name = participant_name
-        token.add_grant(
-            livekit_api.VideoGrant(
-                room_join=True,
-                room=room_name,
+        token = (
+            livekit_api.AccessToken(config.livekit.api_key, config.livekit.api_secret)
+            .with_identity(participant_identity)
+            .with_name(participant_name)
+            .with_metadata(room_metadata or "")
+            .with_grants(
+                livekit_api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                )
             )
         )
 
@@ -341,10 +398,10 @@ async def connection_details(
         logger.info(f"[API] ✅ Generated connection details for room: {room_name}")
 
         return ConnectionDetailsResponse(
-            url=config.livekit.url,
-            token=jwt_token,
-            room_name=room_name,
-            agent_name=agent_name,
+            serverUrl=config.livekit.url,
+            participantToken=jwt_token,
+            roomName=room_name,
+            participantName=participant_name,
         )
     except HTTPException:
         raise

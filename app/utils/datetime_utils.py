@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import re
+from fastapi import HTTPException, status
 
 # Indian Standard Time (IST) offset: UTC +5:30
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -57,6 +58,24 @@ def parse_datetime_safe(dt_str: str) -> datetime:
     if is_utc:
         # It's UTC - parse and convert to IST
         try:
+            # Python < 3.11 fromisoformat is strict about microsecond length (expects 3 or 6)
+            # Supabase sometimes returns 5 or other counts.
+            if '.' in dt_str_clean:
+                base, resto = dt_str_clean.split('.', 1)
+                # resto might be '16726+00:00'
+                if '+' in resto:
+                    ms_part, tz_part = resto.split('+', 1)
+                    tz_part = '+' + tz_part
+                elif '-' in resto:
+                    ms_part, tz_part = resto.split('-', 1)
+                    tz_part = '-' + tz_part
+                else:
+                    ms_part, tz_part = resto, ""
+                
+                # Normalize ms_part to 6 digits
+                ms_part = (ms_part + "000000")[:6]
+                dt_str_clean = f"{base}.{ms_part}{tz_part}"
+
             dt = datetime.fromisoformat(dt_str_clean)
             # Ensure it's UTC-aware, then convert to IST
             if dt.tzinfo is None:
@@ -89,3 +108,22 @@ def parse_datetime_safe(dt_str: str) -> datetime:
             return dt.replace(tzinfo=IST)
         except ValueError as e:
             raise ValueError(f"Failed to parse datetime '{dt_str}' even after cleanup: {e}")
+
+def validate_scheduled_time(scheduled_at: datetime) -> None:
+    """
+    Validate that scheduled time is at least 5 minutes in the future.
+    
+    Args:
+        scheduled_at: Scheduled datetime to validate
+        
+    Raises:
+        HTTPException: If scheduled time is invalid
+    """
+    now = get_now_ist()
+    five_minutes_from_now = now + timedelta(minutes=5)
+    
+    if scheduled_at <= five_minutes_from_now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Scheduled time must be at least 5 minutes from now"
+        )

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, status
 
 from app.schemas.bookings import (
     BookingResponse,
@@ -16,24 +16,46 @@ from app.schemas.admin import (
     SystemInstructionsRequest,
     SystemInstructionsResponse,
     CandidateRegistrationRequest,
+    CandidateRegistrationRequest,
     BulkRegistrationResponse,
 )
-from app.api.main import (  # type: ignore
+from app.schemas.users import (
+    ScheduleInterviewForUserRequest,
+    ScheduleInterviewForUserRequest,
+    BulkScheduleInterviewResponse,
+    BulkScheduleRequest,
+)
+from app.utils.url_helper import get_frontend_url
+import pandas as pd
+from io import BytesIO
+
+from app.services.container import (
     booking_service,
     email_service,
     system_instructions_service,
-    logger,
-    get_current_admin,
-    get_supabase,
-    validate_scheduled_time,
-    get_frontend_url,
-    IST,
+    user_service,
+    slot_service,
+    auth_service,
 )
+from app.utils.logger import get_logger
+from app.utils.auth_dependencies import get_current_admin
+from app.db.supabase import get_supabase
+from app.utils.datetime_utils import (
+    IST,
+    get_now_ist,
+    to_ist,
+    parse_datetime_safe,
+    validate_scheduled_time
+)
+import asyncio
 
-router = APIRouter()
+logger = get_logger(__name__)
+
+# Admin-only management and configuration endpoints
+router = APIRouter(tags=["Admin"])
 
 
-@router.get("/api/admin/job-description", response_model=JobDescriptionResponse)
+@router.get("/job-description", response_model=JobDescriptionResponse)
 async def get_job_description(current_admin: dict = Depends(get_current_admin)):
     """
     Get current job description / system instructions from database.
@@ -50,7 +72,7 @@ async def get_job_description(current_admin: dict = Depends(get_current_admin)):
         )
 
 
-@router.put("/api/admin/job-description", response_model=JobDescriptionResponse)
+@router.put("/job-description", response_model=JobDescriptionResponse)
 async def update_job_description(jd: JobDescriptionRequest, current_admin: dict = Depends(get_current_admin)):
     """
     Update job description / system instructions in database.
@@ -73,7 +95,7 @@ async def update_job_description(jd: JobDescriptionRequest, current_admin: dict 
         )
 
 
-@router.post("/api/admin/managers", response_model=ManagerResponse)
+@router.post("/managers", response_model=ManagerResponse)
 async def enroll_manager(
     request: ManagerRegistrationRequest,
     current_admin: dict = Depends(get_current_admin)
@@ -100,7 +122,7 @@ async def enroll_manager(
         )
 
 
-@router.get("/api/admin/managers", response_model=List[ManagerResponse])
+@router.get("/managers", response_model=List[ManagerResponse])
 async def list_managers(current_admin: dict = Depends(get_current_admin)):
     """
     List all managers.
@@ -129,7 +151,7 @@ async def list_managers(current_admin: dict = Depends(get_current_admin)):
         )
 
 
-@router.delete("/api/admin/managers/{manager_id}")
+@router.delete("/managers/{manager_id}")
 async def delete_manager(manager_id: str, current_admin: dict = Depends(get_current_admin)):
     """
     Delete a manager by ID.
@@ -147,7 +169,7 @@ async def delete_manager(manager_id: str, current_admin: dict = Depends(get_curr
         )
 
 
-@router.get("/api/admin/system-instructions", response_model=SystemInstructionsResponse)
+@router.get("/system-instructions", response_model=SystemInstructionsResponse)
 async def get_system_instructions(current_admin: dict = Depends(get_current_admin)):
     """
     Get current system instructions.
@@ -164,7 +186,7 @@ async def get_system_instructions(current_admin: dict = Depends(get_current_admi
         )
 
 
-@router.put("/api/admin/system-instructions", response_model=SystemInstructionsResponse)
+@router.put("/system-instructions", response_model=SystemInstructionsResponse)
 async def update_system_instructions(
     request: SystemInstructionsRequest,
     current_admin: dict = Depends(get_current_admin)
@@ -185,7 +207,7 @@ async def update_system_instructions(
         )
 
 
-@router.post("/api/admin/register-candidate", response_model=ScheduleInterviewResponse)
+@router.post("/register-candidate", response_model=ScheduleInterviewResponse)
 async def register_candidate(
     request: CandidateRegistrationRequest,
     http_request: Request,
@@ -261,7 +283,7 @@ async def register_candidate(
         )
 
 
-@router.post("/api/admin/bulk-register", response_model=BulkRegistrationResponse)
+@router.post("/bulk-register", response_model=BulkRegistrationResponse)
 async def bulk_register_candidates(
     file: UploadFile = File(...),
     current_admin: dict = Depends(get_current_admin),
@@ -370,7 +392,7 @@ async def bulk_register_candidates(
         )
 
 
-@router.get("/api/admin/gemini-usage", response_model=List[BookingResponse])
+@router.get("/gemini-usage", response_model=List[BookingResponse])
 async def get_gemini_usage_report(
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -406,7 +428,7 @@ async def get_gemini_usage_report(
         )
 
 
-@router.get("/api/admin/candidates", response_model=PaginatedCandidatesResponse)
+@router.get("/candidates", response_model=PaginatedCandidatesResponse)
 async def get_all_candidates(
     current_admin: dict = Depends(get_current_admin),
     page: int = 1,
@@ -451,8 +473,8 @@ async def get_all_candidates(
 
         # Sorting
         sort_field = sort_by if sort_by in ["created_at", "scheduled_at", "name", "email"] else "created_at"
-        ascending = sort_order == "asc"
-        query = query.order(sort_field, ascending=ascending)
+        is_asc = sort_order == "asc"
+        query = query.order(sort_field, desc=not is_asc)
 
         # Pagination range (Supabase uses 0-based index)
         query = query.range(offset, offset + page_size - 1)
@@ -497,3 +519,332 @@ async def get_all_candidates(
         )
 
 
+@router.post("/schedule-interview", response_model=ScheduleInterviewResponse)
+async def schedule_interview_for_user(
+    request: ScheduleInterviewForUserRequest,
+    http_request: Request,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Schedule an interview for an enrolled user using a predefined slot.
+    Returns interview link immediately and processes email in background.
+    """
+    try:
+        logger.info(f"[API] Scheduling interview for user_id: {request.user_id} with slot_id: {request.slot_id}")
+        
+        # Get the enrolled user
+        user = user_service.get_user(request.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get the slot and validate it exists
+        slot = slot_service.get_slot(request.slot_id)
+        if not slot:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Interview slot not found"
+            )
+        
+        # Check if slot is active and has available capacity
+        if slot['status'] != 'active':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Slot is not available. Status: {slot['status']}"
+            )
+        
+        if slot['current_bookings'] >= slot['max_capacity']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Slot is full. Capacity: {slot['current_bookings']}/{slot['max_capacity']}"
+            )
+        
+        # Parse slot datetime - handle UTC or IST format properly
+        try:
+            slot_datetime_str = slot.get('slot_datetime') or slot.get('start_time')
+            if not slot_datetime_str:
+                raise ValueError("No start time found for slot")
+            
+            # Use parse_datetime_safe to handle both UTC and IST formats
+            scheduled_at = parse_datetime_safe(slot_datetime_str)
+            logger.info(f"[API] Parsed slot datetime: {slot_datetime_str} -> {scheduled_at.isoformat()} (IST)")
+        except (ValueError, KeyError, TypeError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Invalid slot datetime format: {str(e)}"
+            )
+        
+        # Create booking with slot_id reference
+        try:
+            # Resolve actual user_id from users table (if registered) to avoid FK violation
+            # interview_bookings.user_id references users.id, but request.user_id is from enrolled_users
+            auth_user = auth_service.get_user_by_email(user['email'])
+            booking_user_id = auth_user['id'] if auth_user else None
+            
+            token = booking_service.create_booking(
+                name=user['name'],
+                email=user['email'],
+                scheduled_at=scheduled_at,
+                phone=user.get('phone', ''),
+                application_text=None,
+                application_url=None,
+                slot_id=request.slot_id,
+                user_id=booking_user_id,
+                prompt=request.prompt,
+            )
+            logger.info(f"[API] ✅ Booking created successfully: token={token}, user_id={request.user_id}")
+        except Exception as e:
+            logger.error(f"[API] Failed to create booking: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create booking: {str(e)}"
+            )
+        
+        # Increment slot booking count
+        try:
+            success = slot_service.increment_booking_count(request.slot_id)
+            if success:
+                logger.info(f"[API] ✅ Incremented booking count for slot {request.slot_id}")
+            else:
+                logger.warning(f"[API] ⚠️ Failed to increment booking count - slot may be full")
+                # This shouldn't happen as we checked above, but handle it gracefully
+        except Exception as e:
+            logger.warning(f"[API] ⚠️ Failed to increment slot booking count: {str(e)}")
+            # Don't fail the request if slot update fails, but log it
+        
+        # Update user status to 'interviewed'
+        try:
+            user_service.update_user(request.user_id, status='interviewed')
+        except Exception as e:
+            logger.warning(f"[API] Failed to update user status: {str(e)}")
+        
+        # Generate interview URL - use request origin dynamically
+        base_url = get_frontend_url(http_request)
+        interview_url = f"{base_url}/interview/{token}" if base_url else f"/interview/{token}"
+        
+        # Send email and update status in background (non-blocking)
+        async def send_email_and_update_bg():
+            try:
+                # Send email with timeout
+                email_sent, email_error = await asyncio.wait_for(
+                    email_service.send_interview_email(
+                        to_email=user['email'],
+                        name=user['name'],
+                        interview_url=interview_url,
+                        scheduled_at=scheduled_at,
+                    ),
+                    timeout=10.0
+                )
+                if email_sent:
+                    logger.info(f"[API] ✅ Interview email sent to {user['email']}")
+                else:
+                    logger.warning(f"[API] ⚠️ Interview email failed for {user['email']}: {email_error}")
+            except asyncio.TimeoutError:
+                logger.warning(f"[API] ⚠️ Interview email timed out for {user['email']}")
+            except Exception as e:
+                logger.error(f"[API] ❌ Exception sending interview email: {str(e)}", exc_info=True)
+        
+        # Schedule background task
+        asyncio.create_task(send_email_and_update_bg())
+        await asyncio.sleep(0.1)  # Small delay to ensure task is scheduled
+        
+        logger.info(f"[API] ✅ Interview scheduled: {interview_url}")
+        
+        # Return immediately with interview URL
+        return ScheduleInterviewResponse(
+            ok=True,
+            interviewUrl=interview_url,
+            emailSent=False,  # Email is sent in background
+            emailError=None,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Failed to schedule interview: {str(e)}"
+        logger.error(f"[API] {error_msg}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+
+@router.post("/schedule-interview/bulk", response_model=BulkScheduleInterviewResponse)
+async def bulk_schedule_interviews(
+    http_request: Request,
+    file: UploadFile = File(...),
+    prompt: Optional[str] = Form(None),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Bulk schedule interviews from Excel file.
+    Expected format: email, datetime columns.
+    Optional prompt applies to all scheduled interviews.
+    """
+    try:
+        logger.info(f"[API] Bulk scheduling from file: {file.filename}")
+        
+        # Read Excel file
+        try:
+            contents = await file.read()
+            # Simple check for csv based on extension, though usually Excel is used here
+            filename = file.filename.lower()
+            if filename.endswith('.csv'):
+                df = pd.read_csv(BytesIO(contents))
+            else:
+                df = pd.read_excel(BytesIO(contents))
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to read file: {str(e)}"
+            )
+        
+        # Validate columns
+        required_columns = ['email', 'datetime']
+        missing = [c for c in required_columns if c not in df.columns]
+        if missing:
+             raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing columns: {', '.join(missing)}"
+            )
+            
+        # Convert DF to list of dicts for common processing
+        candidates = []
+        for _, row in df.iterrows():
+            candidates.append({
+                "email": str(row['email']).lower().strip(),
+                "datetime": str(row['datetime']).strip()
+            })
+            
+        return await _process_bulk_schedule_data(http_request, candidates, prompt)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Bulk file error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/schedule-interview/bulk-json", response_model=BulkScheduleInterviewResponse)
+async def bulk_schedule_interviews_json(
+    request: BulkScheduleRequest,
+    http_request: Request, # Added http_request to pass to _process_bulk_schedule_data
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Bulk schedule interviews from JSON body.
+    """
+    try:
+        logger.info(f"[API] Bulk scheduling from JSON: {len(request.candidates)} candidates")
+        
+        candidates = []
+        for c in request.candidates:
+            candidates.append({
+                "email": c.email.lower().strip(),
+                "datetime": c.datetime.strip()
+            })
+            
+        return await _process_bulk_schedule_data(http_request, candidates, request.prompt)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Bulk JSON error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _process_bulk_schedule_data(http_request: Request, candidates: List[dict], prompt: Optional[str]) -> BulkScheduleInterviewResponse:
+    """
+    Common logic to process a list of candidate dicts: {'email': ..., 'datetime': ...}
+    """
+    total = len(candidates)
+    successful = 0
+    failed = 0
+    errors = []
+    
+    # Give background tasks a moment to start
+    await asyncio.sleep(0.1)
+    
+    for idx, item in enumerate(candidates):
+        row_num = idx + 1
+        try:
+            email = item['email']
+            datetime_str = item['datetime']
+            
+            if not email or not datetime_str:
+                raise ValueError("email and datetime are required")
+            
+            # Get user
+            user = user_service.get_user_by_email(email)
+            if not user:
+                raise ValueError(f"User with email {email} not found")
+            
+            # Parse datetime
+            try:
+                # Handle pandas datetime objects if they somehow made it here
+                if isinstance(item['datetime'], pd.Timestamp):
+                    scheduled_at = item['datetime'].to_pydatetime()
+                    scheduled_at = to_ist(scheduled_at)
+                else:
+                    # Attempt flexible parsing for string
+                    if 'T' in datetime_str:
+                        dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                    else:
+                        dt = parse_datetime_safe(datetime_str)
+                    scheduled_at = to_ist(dt)
+            except Exception as e:
+                raise ValueError(f"Invalid datetime format: {datetime_str}")
+                
+            # Validate scheduled time
+            now = get_now_ist()
+            if scheduled_at <= now:
+                raise ValueError(f"Scheduled time must be in the future (Time in IST: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S')})")
+            
+            # Create booking
+            auth_user = auth_service.get_user_by_email(user['email'])
+            booking_user_id = auth_user['id'] if auth_user else None
+            
+            token = booking_service.create_booking(
+                name=user.get('name', 'Student'),
+                email=email,
+                scheduled_at=scheduled_at,
+                phone=user.get('phone', ''),
+                user_id=booking_user_id,
+                prompt=prompt
+            )
+            
+            # Generate interview URL
+            base_url = get_frontend_url(http_request)
+            interview_url = f"{base_url}/interview/{token}" if base_url else f"/interview/{token}"
+            
+            # Helper for background email
+            async def send_email_wrapper(t_email, t_name, t_url, t_time):
+                try:
+                    await email_service.send_interview_email(
+                        to_email=t_email,
+                        name=t_name,
+                        interview_url=t_url,
+                        scheduled_at=t_time
+                    )
+                except Exception as e:
+                    logger.warning(f"[API] ⚠️ Bulk interview email failed for {t_email}: {e}")
+            
+            # Schedule email
+            asyncio.create_task(send_email_wrapper(email, user.get('name', 'Student'), interview_url, scheduled_at))
+            
+            successful += 1
+            logger.info(f"[API] ✅ Scheduled interview {idx + 1}/{total}: {email}")
+
+        except Exception as e:
+            failed += 1
+            errors.append(f"Row {row_num} ({item.get('email', '?')}): {str(e)}")
+            
+    return BulkScheduleInterviewResponse(
+        success=True,
+        total=total,
+        successful=successful,
+        failed=failed,
+        errors=errors
+    )

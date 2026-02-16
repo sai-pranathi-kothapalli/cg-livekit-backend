@@ -9,17 +9,20 @@ from app.schemas.auth import (
     AdminLoginRequest,
     AdminLoginResponse,
 )
-from app.api.main import (  # type: ignore
+from app.services.container import (
     auth_service,
     admin_service,
-    logger,
-    limiter,
 )
+from app.utils.logger import get_logger
+from app.utils.limiter import limiter
 
-router = APIRouter()
+logger = get_logger(__name__)
+
+# All authentication-related endpoints
+router = APIRouter(tags=["Auth"])
 
 
-@router.post("/api/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse)
 @limiter.limit("15/minute")
 async def login(request: Request, body: LoginRequest):
   """
@@ -90,25 +93,27 @@ async def login(request: Request, body: LoginRequest):
     )
 
 
-@router.post("/api/auth/change-password")
+@router.post("/change-password")
 async def change_password(request: ChangePasswordRequest):
   """
-  Change password for a student (requires old password).
+  Change password for any user (student, manager, admin).
   """
-  success = auth_service.change_student_password(
+  success = auth_service.change_user_password(
     request.email,
     request.old_password,
     request.new_password
   )
   if not success:
+    logger.warning(f"[API] Password change failed for {request.email}: Invalid email or old password")
     raise HTTPException(
       status_code=status.HTTP_400_BAD_REQUEST,
       detail="Invalid email or current password"
     )
+  logger.info(f"[API] ✅ Password changed successfully for {request.email}")
   return {"success": True, "message": "Password updated successfully"}
 
 
-@router.post("/api/auth/reset-password")
+@router.post("/reset-password")
 async def reset_password(request: ResetPasswordRequest):
   """
   Reset password for a student or manager (forgot password flow).
@@ -119,6 +124,7 @@ async def reset_password(request: ResetPasswordRequest):
     # Check if user exists and is a student or manager
     user = auth_service.get_user_by_email(request.email)
     if not user or user.get('role') not in ['student', 'manager']:
+      logger.warning(f"[API] Reset password failed: User {request.email} not found or invalid role")
       raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="User with this email not found"
@@ -143,7 +149,7 @@ async def reset_password(request: ResetPasswordRequest):
     )
 
 
-@router.post("/api/student/register", response_model=LoginResponse)
+@router.post("/student/register", response_model=LoginResponse)
 async def student_register(request: StudentRegisterRequest):
   """
   Register a new student account.
@@ -171,6 +177,7 @@ async def student_register(request: StudentRegisterRequest):
       error_msg = str(e)
       # Check if student already exists
       if "already registered" in error_msg.lower() or "unique constraint" in error_msg.lower() or "already exists" in error_msg.lower():
+        logger.warning(f"[API] Student registration failed: Email {request.email} is already registered")
         raise HTTPException(
           status_code=status.HTTP_400_BAD_REQUEST,
           detail=f"Email {request.email} is already registered"
@@ -214,7 +221,7 @@ async def student_register(request: StudentRegisterRequest):
     )
 
 
-@router.post("/api/admin/login", response_model=AdminLoginResponse)
+@router.post("/admin/login", response_model=AdminLoginResponse)
 @limiter.limit("15/minute")
 async def admin_login(request: Request, body: AdminLoginRequest):
   """

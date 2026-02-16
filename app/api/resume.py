@@ -1,16 +1,19 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, status
 
 from app.schemas.resume import UploadApplicationResponse
-from app.api.main import (  # type: ignore
+from app.services.container import (
     resume_service,
     booking_service,
-    logger,
 )
+from app.utils.logger import get_logger
 
-router = APIRouter()
+logger = get_logger(__name__)
+
+# Resume / application upload endpoints
+router = APIRouter(tags=["Resume"])
 
 
-@router.post("/api/upload-application", response_model=UploadApplicationResponse)
+@router.post("/upload-application", response_model=UploadApplicationResponse)
 async def upload_application(file: UploadFile = File(...)):
     """
     Upload and process application file.

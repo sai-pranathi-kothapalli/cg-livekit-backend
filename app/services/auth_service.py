@@ -316,18 +316,37 @@ class AuthService:
     def reset_student_password(self, email: str, new_password: str) -> bool:
         return self.reset_password(email, new_password)
 
-    def change_student_password(self, email: str, old_password: str, new_password: str) -> bool:
+    def change_user_password(self, email: str, old_password: str, new_password: str) -> bool:
+        """
+        Change password for any user type (admin, manager, or student).
+        First tries to authenticate as student, then as admin/manager.
+        """
         try:
-            student = self.authenticate_student(email, old_password)
-            if not student:
+            # 1. Try to authenticate as student
+            user = self.authenticate_student(email, old_password)
+            
+            # 2. If not student, try to authenticate as admin/manager 
+            # (Note: admin auth uses username, but here we might have email. 
+            # If email is passed, we might need to look up username or just try email as username if they are same?
+            # Or we can query by email to find user and check password hash directly.)
+            if not user:
+                 # Fetch user by email to get check password
+                response = self.client.table("users").select("*").eq("email", email).execute()
+                if response.data:
+                    u = response.data[0]
+                    if u.get('password_hash') and self.verify_password(old_password, u.get('password_hash')):
+                         user = u
+            
+            if not user:
                 return False
+
             new_password_hash = self.hash_password(new_password)
             
             response = self.client.table("users").update({
                 "password_hash": new_password_hash,
                 "must_change_password": False,
                 "updated_at": get_now_ist().isoformat()
-            }).eq("email", email).execute()
+            }).eq("id", user['id']).execute()
             
             if response.data:
                 logger.info(f"[AuthService] ✅ Password changed for {email}")
@@ -336,3 +355,7 @@ class AuthService:
         except Exception as e:
             logger.error(f"[AuthService] Password change error: {str(e)}", exc_info=True)
             return False
+
+    def change_student_password(self, email: str, old_password: str, new_password: str) -> bool:
+        # Backward compatibility - delegate to generic method
+        return self.change_user_password(email, old_password, new_password)

@@ -5,7 +5,7 @@ Moved from app.api.main without changing fields or validation.
 
 from typing import Dict, List, Optional, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.bookings import BookingResponse
 
@@ -40,8 +40,8 @@ class EvaluationResponse(BaseModel):
 
 
 class ConnectionDetailsRequest(BaseModel):
-    room_config: Optional[dict] = None
-    token: Optional[str] = None
+    room_config: Optional[dict] = Field(None, example={"audio": True, "video": False})
+    token: Optional[str] = Field(None, example="XyeNodpGCy0H3HFEneHUTrw4kL35q39Z")
 
 
 class ConnectionDetailsResponse(BaseModel):

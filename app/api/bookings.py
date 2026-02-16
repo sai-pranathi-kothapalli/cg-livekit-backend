@@ -8,22 +8,25 @@ from app.schemas.bookings import (
     ScheduleInterviewResponse,
     BookingResponse,
 )
-from app.api.main import (  # type: ignore
+from app.services.container import (
     booking_service,
     email_service,
-    logger,
-    config,
-    get_optional_student,
-    validate_scheduled_time,
-    get_frontend_url,
     slot_service,
-    IST,
 )
+from app.utils.logger import get_logger
+from app.config import get_config
+from app.utils.auth_dependencies import get_optional_student
+from app.utils.datetime_utils import IST, validate_scheduled_time
+from app.utils.url_helper import get_frontend_url
 
-router = APIRouter()
+logger = get_logger(__name__)
+config = get_config()
+
+# Public interview booking endpoints
+router = APIRouter(tags=["Bookings"])
 
 
-@router.post("/api/schedule-interview", response_model=ScheduleInterviewResponse)
+@router.post("/schedule-interview", response_model=ScheduleInterviewResponse)
 async def schedule_interview(request: ScheduleInterviewRequest, http_request: Request):
     """
     Schedule an interview.
@@ -123,7 +126,7 @@ async def schedule_interview(request: ScheduleInterviewRequest, http_request: Re
         )
 
 
-@router.get("/api/booking/{token}", response_model=BookingResponse)
+@router.get("/booking/{token}", response_model=BookingResponse)
 async def get_booking(
     token: str,
     current_student: Optional[dict] = Depends(get_optional_student)

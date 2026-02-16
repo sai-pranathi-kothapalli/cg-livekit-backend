@@ -5,7 +5,7 @@ Moved from app.api.main without changing fields or validation.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.slots import SlotResponse
 
@@ -21,8 +21,8 @@ class AssignmentResponse(BaseModel):
 
 
 class SelectSlotRequest(BaseModel):
-    slot_id: str
-    prompt: Optional[str] = None
+    slot_id: str = Field(..., example="bc7d68f3-982b-4dbe-95bb-8d5621ac88cc")
+    prompt: Optional[str] = Field(None, example="Focus more on Python concurrency during this round.")
 
 
 class MyInterviewResponse(BaseModel):

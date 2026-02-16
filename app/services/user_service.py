@@ -95,8 +95,11 @@ class UserService:
 
     def update_user(self, user_id: str, **kwargs) -> Dict[str, Any]:
         try:
-            kwargs['updated_at'] = get_now_ist().isoformat()
-            response = self.client.table("enrolled_users").update(kwargs).eq("id", user_id).execute()
+            # Filter out None values to avoid overwriting with null in Supabase
+            update_data = {k: v for k, v in kwargs.items() if v is not None}
+            update_data['updated_at'] = get_now_ist().isoformat()
+            
+            response = self.client.table("enrolled_users").update(update_data).eq("id", user_id).execute()
             
             if not response.data:
                 raise AgentError("Failed to update user", "UserService")

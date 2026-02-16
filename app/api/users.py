@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 
 from app.schemas.users import (
     EnrollUserRequest,
+    UpdateUserRequest,
     UserResponse,
     UserDetailResponse,
     BulkEnrollResponse,
@@ -12,7 +13,7 @@ from app.schemas.users import (
     BulkScheduleInterviewResponse,
     InterviewSummary,
 )
-from app.api.main import (  # type: ignore
+from app.services.container import (
     booking_service,
     evaluation_service,
     user_service,
@@ -20,22 +21,22 @@ from app.api.main import (  # type: ignore
     slot_service,
     assignment_service,
     email_service,
-    evaluation_service,
-    logger,
-    get_current_admin,
-    get_supabase,
-    get_now_ist,
-    IST,
-    to_ist,
-    pd,
-    BytesIO,
-    asyncio,
 )
+from app.utils.logger import get_logger
+from app.utils.auth_dependencies import get_current_admin
+from app.db.supabase import get_supabase
+from app.utils.datetime_utils import get_now_ist, IST, to_ist
 
-router = APIRouter()
+logger = get_logger(__name__)
+import pandas as pd
+from io import BytesIO
+import asyncio
+
+# Admin-facing enrolled user management endpoints
+router = APIRouter(tags=["Users"])
 
 
-@router.post("/api/admin/users", response_model=UserResponse)
+@router.post("/", response_model=UserResponse)
 async def enroll_user(
     request: EnrollUserRequest,
     background_tasks: BackgroundTasks,
@@ -97,8 +98,16 @@ async def enroll_user(
                 logger.info(f"[API] Auto-assigned {len(target_slot_ids)} slots to user {request.email}")
             except Exception as e:
                 logger.error(f"[API] Failed to auto-assign slots: {str(e)}")
-        else:
+        
+        if not target_slot_ids:
+                logger.warning(f"[API] Enrollment failed: No available slots for auto-assignment for {request.email}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No available slots found for auto-assignment. Please provide slot_ids manually.",
+                )
+        elif request.slot_ids: # Only enforce the 10-slot rule if they provided them manually
             if len(target_slot_ids) < 10:
+                logger.warning(f"[API] Enrollment failed: User {request.email} provided only {len(target_slot_ids)} slots, minimum 10 required.")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="At least 10 slots must be assigned to the user",
@@ -108,11 +117,13 @@ async def enroll_user(
             for slot_id in target_slot_ids:
                 slot = slot_service.get_slot(slot_id)
                 if not slot:
+                    logger.warning(f"[API] Enrollment failed: Slot {slot_id} not found")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Slot {slot_id} not found",
                     )
                 if slot["status"] != "active":
+                    logger.warning(f"[API] Enrollment failed: Slot {slot_id} is not active ({slot['status']})")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Slot {slot_id} is not active",
@@ -181,7 +192,7 @@ async def enroll_user(
         )
 
 
-@router.post("/api/admin/users/bulk-enroll", response_model=BulkEnrollResponse)
+@router.post("/bulk-enroll", response_model=BulkEnrollResponse)
 async def bulk_enroll_users(
     file: UploadFile = File(...),
     current_admin: dict = Depends(get_current_admin),
@@ -332,7 +343,7 @@ async def bulk_enroll_users(
         )
 
 
-@router.get("/api/admin/users", response_model=List[UserResponse])
+@router.get("/", response_model=List[UserResponse])
 async def get_all_users(
     current_admin: dict = Depends(get_current_admin),
     limit: Optional[int] = None,
@@ -353,7 +364,7 @@ async def get_all_users(
         )
 
 
-@router.get("/api/admin/users/{user_id}", response_model=UserDetailResponse)
+@router.get("/{user_id}", response_model=UserDetailResponse)
 async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin)):
     """
     Get an enrolled user by ID with full interview history.
@@ -433,10 +444,10 @@ async def get_user(user_id: str, current_admin: dict = Depends(get_current_admin
         )
 
 
-@router.put("/api/admin/users/{user_id}", response_model=UserResponse)
+@router.put("/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: str,
-    request: "UpdateUserRequest",  # type: ignore[name-defined]
+    request: UpdateUserRequest,
     current_admin: dict = Depends(get_current_admin),
 ):
     """
@@ -468,7 +479,7 @@ async def update_user(
         )
 
 
-@router.delete("/api/admin/users/{user_id}")
+@router.delete("/{user_id}")
 async def delete_user(user_id: str, current_admin: dict = Depends(get_current_admin)):
     """
     Delete an enrolled user and all associated data.
@@ -527,7 +538,7 @@ async def delete_user(user_id: str, current_admin: dict = Depends(get_current_ad
         )
 
 
-@router.post("/api/admin/users/remove-student-auth")
+@router.post("/remove-student-auth")
 async def remove_student_auth_by_email(
     request: "UserResponse",  # just need email field; reuse existing model
     current_admin: dict = Depends(get_current_admin),

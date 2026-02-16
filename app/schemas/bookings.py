@@ -5,16 +5,16 @@ Moved from app.api.main without changes.
 
 from typing import Dict, List, Optional, Any
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class ScheduleInterviewRequest(BaseModel):
-    name: str
-    email: EmailStr
-    phone: Optional[str] = None
-    datetime: str  # ISO datetime string
-    applicationUrl: Optional[str] = None
-    applicationText: Optional[str] = None
+    name: str = Field(..., example="Tester McGee")
+    email: EmailStr = Field(..., example="tester@example.com")
+    phone: Optional[str] = Field(None, example="1234567890")
+    datetime: str = Field(..., example="2026-02-14T17:00:00+05:30")  # ISO datetime string
+    applicationUrl: Optional[str] = Field(None, example="http://example.com/resume.pdf")
+    applicationText: Optional[str] = Field(None, example="Extracted resume text content...")
 
 
 class ScheduleInterviewResponse(BaseModel):

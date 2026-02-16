@@ -3,25 +3,25 @@ Enrolled users and related Pydantic schemas.
 Moved from app.api.main without changing fields or validation.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class EnrollUserRequest(BaseModel):
-    name: str
-    email: EmailStr
-    phone: Optional[str] = None
-    notes: Optional[str] = None
-    slot_ids: List[str] = []  # List of slot IDs to assign to the user (min 10 slots in next 2 days)
+    name: str = Field(..., min_length=2, description="Candidate's full name.", example="Jane Doe")
+    email: EmailStr = Field(..., example="jane@example.com")
+    phone: Optional[str] = Field(None, example="1234567890")
+    notes: Optional[str] = Field(None, example="Highly recommended candidate")
+    slot_ids: List[str] = Field(default=[], description="List of slot IDs to assign (minimum 10 recommended).", example=["bc7d68f3-982b-4dbe-95bb-8d5621ac88cc"])
 
 
 class UpdateUserRequest(BaseModel):
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
+    name: Optional[str] = Field(None, example="Jane X. Doe")
+    email: Optional[EmailStr] = Field(None, example="jane.new@example.com")
+    phone: Optional[str] = Field(None, example="0987654321")
+    status: Optional[str] = Field(None, example="inactive")
+    notes: Optional[str] = Field(None, example="Updated notes")
 
 
 class UserResponse(BaseModel):
@@ -63,9 +63,9 @@ class BulkEnrollResponse(BaseModel):
 
 
 class ScheduleInterviewForUserRequest(BaseModel):
-    user_id: str
-    slot_id: str
-    prompt: Optional[str] = None  # Custom prompt for the AI interviewer
+    user_id: str = Field(..., example="f36caeef-761e-447d-9d59-db94597261a7")
+    slot_id: str = Field(..., example="bc7d68f3-982b-4dbe-95bb-8d5621ac88cc")
+    prompt: Optional[str] = Field(None, example="Discuss distributed systems architecture.")
 
 
 class BulkScheduleInterviewResponse(BaseModel):
@@ -76,6 +76,16 @@ class BulkScheduleInterviewResponse(BaseModel):
     errors: Optional[List[str]] = None
 
 
+class BulkScheduleItem(BaseModel):
+    email: EmailStr = Field(..., example="candidate1@example.com")
+    datetime: str = Field(..., example="2026-02-14T18:00:00+05:30")  # ISO format string
+
+
+class BulkScheduleRequest(BaseModel):
+    prompt: Optional[str] = Field(None, example="Focus on leadership skills and team management.")
+    candidates: List[BulkScheduleItem] = Field(..., example=[{"email": "c1@example.com", "datetime": "2026-02-14T10:00:00+05:30"}])
+
+
 __all__ = [
     "EnrollUserRequest",
     "UpdateUserRequest",
@@ -84,6 +94,9 @@ __all__ = [
     "UserDetailResponse",
     "BulkEnrollResponse",
     "ScheduleInterviewForUserRequest",
+    "ScheduleInterviewForUserRequest",
     "BulkScheduleInterviewResponse",
+    "BulkScheduleItem",
+    "BulkScheduleRequest",
 ]
 

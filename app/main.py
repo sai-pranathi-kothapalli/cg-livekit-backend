@@ -10,6 +10,16 @@ from app.api.main import app  # type: ignore  # noqa: F401
 from app.api import auth as auth_api
 from app.api import admin as admin_api
 from app.api import bookings as bookings_api
+from app.utils.logger import get_logger, setup_logging
+from app.config import get_config
+
+config = get_config()
+setup_logging(config)
+logger = get_logger(__name__)
+
+from app.api import auth as auth_api
+from app.api import admin as admin_api
+from app.api import bookings as bookings_api
 from app.api import interviews as interviews_api
 from app.api import resume as resume_api
 from app.api import slots as slots_api

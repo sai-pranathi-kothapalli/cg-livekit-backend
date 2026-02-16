@@ -97,6 +97,20 @@ class ServerConfig:
     frontend_url: str = ""
     # Public URL for links in emails (login, interview). Use e.g. https://interview.skillifire.com
     public_frontend_url: str = ""
+@dataclass
+class ServerConfig:
+    """HTTP server configuration"""
+    host: str
+    port: int
+    frontend_url: str = ""
+    # Public URL for links in emails (login, interview). Use e.g. https://interview.skillifire.com
+    public_frontend_url: str = ""
+
+
+@dataclass
+class APIKeyConfig:
+    """API Key configuration for machine-to-machine auth"""
+    key_hash: Optional[str] = None
 
 
 @dataclass
@@ -121,6 +135,9 @@ class Config:
     
     # Server configuration
     server: ServerConfig
+    
+    # API Key configuration
+    api_key: APIKeyConfig
     
     # Application processing
     MAX_APPLICATION_LENGTH: int = 3000  # Characters
@@ -267,6 +284,9 @@ class Config:
                 port=int(os.getenv("SERVER_PORT", "8000")),
                 frontend_url=os.getenv("NEXT_PUBLIC_APP_URL") or os.getenv("FRONTEND_URL", ""),
                 public_frontend_url=(os.getenv("PUBLIC_FRONTEND_URL") or os.getenv("FRONTEND_PUBLIC_URL") or "").strip(),
+            ),
+            api_key=APIKeyConfig(
+                key_hash=os.getenv("API_KEY_HASH"),
             ),
             MAX_APPLICATION_LENGTH=int(os.getenv("MAX_APPLICATION_LENGTH", "3000")),
             ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",

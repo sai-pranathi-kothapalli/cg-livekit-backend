@@ -12,7 +12,7 @@ from app.config import Config
 from app.db.supabase import get_supabase
 from app.utils.logger import get_logger
 from app.utils.exceptions import AgentError
-from app.utils.datetime_utils import get_now_ist, to_ist
+from app.utils.datetime_utils import get_now_ist, to_ist, parse_datetime_safe
 
 logger = get_logger(__name__)
 
@@ -61,8 +61,8 @@ class SlotService:
                     # Parse (properly handling Z or offset) and convert to IST
                     dt_str = slot[field]
                     if isinstance(dt_str, str):
-                        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-                        slot[field] = to_ist(dt).isoformat()
+                        dt = parse_datetime_safe(dt_str)
+                        slot[field] = dt.isoformat()
                 except (ValueError, TypeError):
                     logger.warning(f"Failed to convert field {field} to IST: {slot[field]}")
 
@@ -220,6 +220,48 @@ class SlotService:
         except Exception as e:
             logger.error(f"Error updating slot status: {e}")
             return False
+
+    def create_day_slots(
+        self,
+        date: Any,
+        start_hour: int,
+        start_minute: int,
+        end_hour: int,
+        end_minute: int,
+        interval_minutes: int,
+        max_capacity: int = 1,
+        notes: Optional[str] = None,
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
+        """Generate multiple slots for a specific day."""
+        from datetime import time, timedelta
+        
+        created_slots = []
+        errors = []
+        
+        current_time = datetime.combine(date, time(hour=start_hour, minute=start_minute))
+        end_time_boundary = datetime.combine(date, time(hour=end_hour, minute=end_minute))
+        
+        while current_time < end_time_boundary:
+            next_slot_time = current_time + timedelta(minutes=interval_minutes)
+            if next_slot_time > end_time_boundary:
+                break
+                
+            try:
+                slot = self.create_slot(
+                    start_time=current_time,
+                    end_time=next_slot_time,
+                    max_bookings=max_capacity,
+                    notes=notes,
+                    duration_minutes=interval_minutes
+                )
+                created_slots.append(slot)
+            except Exception as e:
+                errors.append(f"Failed to create slot at {current_time.isoformat()}: {str(e)}")
+            
+            current_time = next_slot_time
+            
+        return created_slots, errors
+
 
     def increment_booking_count(self, slot_id: str) -> bool:
         try:
