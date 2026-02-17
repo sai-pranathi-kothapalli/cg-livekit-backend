@@ -85,7 +85,7 @@ class SMTPConfig:
     secure: bool = False
     user: Optional[str] = None
     password: Optional[str] = None
-    from_name: str = "Sreedhar's CCE Team"
+    from_name: str = "Codegnan Team"
     from_email: Optional[str] = None
 
 
@@ -276,7 +276,7 @@ class Config:
                 secure=smtp_secure,
                 user=os.getenv("SMTP_USER"),
                 password=os.getenv("SMTP_PASSWORD"),
-                from_name=os.getenv("SMTP_FROM_NAME", "Sreedhar's CCE Team"),
+                from_name=os.getenv("SMTP_FROM_NAME", "Codegnan Team"),
                 from_email=os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER"),
             ),
             server=ServerConfig(

@@ -57,7 +57,7 @@ class EmailService:
             
             # Create email message
             message = MIMEMultipart("alternative")
-            message["Subject"] = "Your Regional Rural Bank PO Interview - Join Link"
+            message["Subject"] = "Your Codegnan Interview - Join Link"
             message["From"] = f'"{self.config.smtp.from_name}" <{self.config.smtp.from_email}>'
             message["To"] = to_email
             
@@ -124,7 +124,7 @@ class EmailService:
             
             # Create email message
             message = MIMEMultipart("alternative")
-            message["Subject"] = "Welcome to Sreedhar's CCE - Your Account Credentials"
+            message["Subject"] = "Welcome to Codegnan - Your Account Credentials"
             message["From"] = f'"{self.config.smtp.from_name}" <{self.config.smtp.from_email}>'
             message["To"] = to_email
             
@@ -191,13 +191,13 @@ class EmailService:
 <body>
     <div class="container">
         <div class="header">
-            <h1>Welcome to Sreedhar's CCE!</h1>
+            <h1>Welcome to Codegnan!</h1>
             <p style="margin: 0; font-size: 18px;">Your Account Has Been Created</p>
         </div>
         <div class="content">
             <p>Hi <strong>{name}</strong>,</p>
             
-            <p>Your account has been successfully created. Please use the following credentials to log in:</p>
+            <p>Please see your login credentials below:</p>
             
             <div class="credentials">
                 <h2 style="margin-top: 0; color: #002cf2;">🔐 Your Login Credentials</h2>
@@ -234,7 +234,7 @@ class EmailService:
             </div>
             
             <div class="footer">
-                <p>Best regards,<br><strong>Sreedhar's CCE Team</strong><br>RESULTS SUPER STAR</p>
+                <p>Best regards,<br><strong>Codegnan Team</strong></p>
             </div>
         </div>
     </div>
@@ -267,13 +267,13 @@ class EmailService:
     <div class="container">
         <div class="header">
             <h1>🎯 Your Interview is Scheduled!</h1>
-            <p style="margin: 0; font-size: 18px;">Regional Rural Bank Probationary Officer (PO)</p>
-            <div class="logo-text">Sreedhar's CCE - RESULTS SUPER STAR</div>
+            <p style="margin: 0; font-size: 18px;">Codegnan Interview Platform</p>
+            <div class="logo-text">Codegnan Team</div>
         </div>
         <div class="content">
             <p>Hi <strong>{name}</strong>,</p>
             
-            <p>Thank you for applying for the <strong>Regional Rural Bank Probationary Officer (PO)</strong> position!</p>
+            <p>Thank you for your interest in the position!</p>
             
             <div class="details">
                 <h2 style="margin-top: 0; color: #002cf2;">📅 Interview Details</h2>
@@ -284,7 +284,7 @@ class EmailService:
                     <span class="detail-label">Time:</span> {formatted_time} (IST)
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Position:</span> Regional Rural Bank Probationary Officer (PO)
+                    <span class="detail-label">Platform:</span> Codegnan Interview Platform
                 </div>
             </div>
 
@@ -310,7 +310,7 @@ class EmailService:
             </p>
             
             <div class="footer">
-                <p>Best regards,<br><strong>Sreedhar's CCE Team</strong><br>RESULTS SUPER STAR</p>
+                <p>Best regards,<br><strong>Codegnan Team</strong></p>
                 <p style="margin-top: 20px;">
                     <a href="{interview_url}" style="color: #002cf2; word-break: break-all;">{interview_url}</a>
                 </p>
