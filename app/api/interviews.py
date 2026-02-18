@@ -312,11 +312,21 @@ async def connection_details(
                     detail=f"Failed to validate interview: {str(e)}"
                 )
 
-        # Generate room details - use interview_<token> so the worker can save transcripts to MongoDB
-        participant_name = "user"
-        participant_identity = f"voice_assistant_user_{random.randint(1, 99999)}"
+        # [MODIFIED] Generate deterministic room details
+        # Random identities cause the backend to treat re-connections as new participants,
+        # potentially triggering duplicate agents if not handled carefully.
         booking_token = getattr(request, "token", None) or ""
-        room_name = f"interview_{booking_token}" if booking_token else f"voice_assistant_room_{random.randint(1, 99999)}"
+        
+        # Use a deterministic identity for the user centered around the booking token
+        if booking_token:
+            participant_identity = f"user_{booking_token}"
+            room_name = f"interview_{booking_token}"
+        else:
+            # Fallback for sandbox/agent-only rooms
+            participant_identity = f"voice_assistant_user_{random.randint(1, 99999)}"
+            room_name = f"voice_assistant_room_{random.randint(1, 99999)}"
+        
+        participant_name = "Candidate"
 
         # Create room metadata (application_text + booking_token for worker transcript storage)
         room_metadata_dict: Dict[str, Any] = {}

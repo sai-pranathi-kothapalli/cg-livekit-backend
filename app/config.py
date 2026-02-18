@@ -59,7 +59,7 @@ class OpenAIConfig:
 class GeminiConfig:
     """Google Gemini LLM configuration (primary LLM)"""
     api_key: str
-    model: str = "gemini-1.5-flash"
+    model: str = "gemini-2.0-flash"
 
 
 @dataclass
@@ -264,7 +264,7 @@ class Config:
             ),
             gemini_llm=GeminiConfig(
                 api_key=gemini_api_key,
-                model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+                model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
             ),
             supabase=SupabaseConfig(
                 url=os.getenv("SUPABASE_URL", ""),

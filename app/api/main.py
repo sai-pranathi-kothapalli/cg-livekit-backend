@@ -97,8 +97,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Include localhost (dev), common LAN origin, and cloudflared tunnel URLs.
 _cors_origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
     "http://127.0.0.1:5173",
     "http://192.168.1.13:3000",  # LAN access (e.g. from same network)
 ]
