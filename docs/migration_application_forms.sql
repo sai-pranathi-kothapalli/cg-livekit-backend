@@ -1,3 +1,4 @@
+-- DEPRECATED: This migration uses table name student_application_forms. Live schema uses application_forms. Do not run as-is on production.
 -- Student Application Forms Table
 -- Stores application forms filled/uploaded by students
 

@@ -70,7 +70,7 @@
 
 **Fixed:** Fields are now stored **directly as database columns** (not nested in a `data` JSONB field).
 
-Each field maps directly to a column in the `student_application_forms` table.
+Each field maps directly to a column in the `application_forms` table.
 
 ## Verification
 
@@ -93,7 +93,7 @@ SELECT
     religion,
     state_applying_for,
     application_text
-FROM student_application_forms
+FROM application_forms
 WHERE user_id = 'YOUR_USER_ID'
 LIMIT 1;
 ```

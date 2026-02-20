@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
@@ -25,6 +26,10 @@ import random
 
 logger = get_logger(__name__)
 config = get_config()
+
+# Debounce: prevent duplicate agent dispatch for same room within N seconds
+_dispatch_debounce: Dict[str, float] = {}
+_DISPATCH_DEBOUNCE_SEC = 5
 
 # Interview evaluation and LiveKit connection endpoints
 router = APIRouter(tags=["Interviews"])
@@ -361,26 +366,35 @@ async def connection_details(
 
                 # [OK] Explicitly create agent dispatch to trigger job request ONLY if an agent isn't already there
                 try:
-                    # Check for existing agent participant to ensure idempotency
-                    participants_resp = await lkapi.room.list_participants(
-                        livekit_api.ListParticipantsRequest(room=room_name)
-                    )
-                    agent_exists = any(
-                        p.identity.startswith("agent-") 
-                        for p in participants_resp.participants
-                    )
-                    
-                    if agent_exists:
-                        logger.info(f"[API] 🤖 Agent already present in room '{room_name}'. Skipping duplicate dispatch.")
+                    # Debounce: skip if we recently dispatched for this room (handles rapid double-requests)
+                    now_ts = time.time()
+                    for r in list(_dispatch_debounce.keys()):
+                        if now_ts - _dispatch_debounce[r] > _DISPATCH_DEBOUNCE_SEC:
+                            del _dispatch_debounce[r]
+                    if room_name in _dispatch_debounce:
+                        logger.info(f"[API] 🤖 Debounce: Skipping dispatch for '{room_name}' (recently dispatched).")
                     else:
-                        await lkapi.agent_dispatch.create_dispatch(
-                            livekit_api.CreateAgentDispatchRequest(
-                                agent_name=agent_name,
-                                room=room_name,
-                                metadata=room_metadata or ""
-                            )
+                        # Check for existing agent participant to ensure idempotency
+                        participants_resp = await lkapi.room.list_participants(
+                            livekit_api.ListParticipantsRequest(room=room_name)
                         )
-                        logger.info(f"[API] 🚀 Agent dispatch created for room '{room_name}' with agent '{agent_name}'")
+                        agent_exists = any(
+                            p.identity.startswith("agent-")
+                            for p in participants_resp.participants
+                        )
+
+                        if agent_exists:
+                            logger.info(f"[API] 🤖 Agent already present in room '{room_name}'. Skipping duplicate dispatch.")
+                        else:
+                            await lkapi.agent_dispatch.create_dispatch(
+                                livekit_api.CreateAgentDispatchRequest(
+                                    agent_name=agent_name,
+                                    room=room_name,
+                                    metadata=room_metadata or ""
+                                )
+                            )
+                            _dispatch_debounce[room_name] = now_ts
+                            logger.info(f"[API] 🚀 Agent dispatch created for room '{room_name}' with agent '{agent_name}'")
                 except Exception as dispatch_e:
                     logger.warning(f"[API] ⚠️ Failed to check participants or create explicit agent dispatch: {dispatch_e}")
 

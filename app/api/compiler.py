@@ -103,9 +103,9 @@ async def execute_code(request: CodeExecutionRequest):
             
             result = response.json()
             
-            # Extract results from OneCompiler response
-            stdout = result.get("stdout", "")
-            stderr = result.get("stderr", "")
+            # Extract results from OneCompiler response (use or "" so None from API becomes empty string)
+            stdout = result.get("stdout") or ""
+            stderr = result.get("stderr") or ""
             execution_time = result.get("executionTime")
             memory = result.get("memory")
             

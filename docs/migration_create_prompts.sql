@@ -1,3 +1,4 @@
+-- DEPRECATED: This migration creates system_prompts. Live schema uses system_instructions (column: instructions). Do not run as-is on production.
 -- Create system_prompts table
 CREATE TABLE IF NOT EXISTS system_prompts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

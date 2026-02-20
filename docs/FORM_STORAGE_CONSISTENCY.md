@@ -95,7 +95,7 @@ SELECT
     mobile_number,
     application_file_url,  -- NULL for manual, URL for PDF
     status  -- 'submitted' for manual, 'draft' for PDF
-FROM student_application_forms
+FROM application_forms
 WHERE user_id = 'YOUR_USER_ID';
 ```
 

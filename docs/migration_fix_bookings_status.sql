@@ -19,7 +19,7 @@ ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sch
 ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS slot_id UUID REFERENCES interview_slots(id) ON DELETE SET NULL;
 ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES enrolled_users(id) ON DELETE SET NULL;
 ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS assignment_id UUID REFERENCES user_slot_assignments(id) ON DELETE SET NULL;
-ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS application_form_id UUID REFERENCES student_application_forms(id) ON DELETE SET NULL;
+ALTER TABLE interview_bookings ADD COLUMN IF NOT EXISTS application_form_id UUID REFERENCES application_forms(id) ON DELETE SET NULL;
 
 -- 3. Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_bookings_token ON interview_bookings(token);
