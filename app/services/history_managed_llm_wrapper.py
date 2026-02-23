@@ -16,10 +16,44 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# --- Interview guard: prevent AI from concluding early ---
+MIN_REQUIRED_QUESTIONS = 8
+_questions_asked: int = 0
+
+
+def get_questions_asked() -> int:
+    """Return number of assistant turns (questions) so far this session."""
+    return _questions_asked
+
+
+def increment_questions_asked() -> None:
+    """Call when an assistant response (question) has been completed."""
+    global _questions_asked
+    _questions_asked += 1
+
+
+def reset_questions_asked() -> None:
+    """Call when a new interview starts (e.g. candidate joins)."""
+    global _questions_asked
+    _questions_asked = 0
+
 
 # Decoder-level: block wrap-up language so model cannot end the interview on its own
 WRAPUP_REPLACEMENT = "Let me ask you one more question."
+# Order matters for earliest match: stronger conclusion phrases first so we truncate before "Okay. This concludes..."
 WRAPUP_PHRASES = (
+    "this concludes the interview",
+    "that concludes the interview",
+    "this concludes our interview",
+    "that concludes our interview",
+    "concludes the interview",
+    "we're now approaching the end",
+    "we are now approaching the end",
+    "approaching the end of the interview",
+    "approaching the end of our time",
+    "do you have any questions for me",
+    "any questions for me",
+    "any questions for us",
     "thank you for your time",
     "thanks for your time",
     "that's all from my side",
@@ -32,6 +66,7 @@ WRAPUP_PHRASES = (
     "interview is over",
     "interview is complete",
     "that concludes",
+    "this concludes",
     "wish you all the best",
     "all the best",
     "good luck",
@@ -52,12 +87,24 @@ def _contains_wrapup(text: str) -> bool:
     return any(phrase in lower for phrase in WRAPUP_PHRASES)
 
 
+# Sentences that still look like conclusion even after truncation — drop them and show only replacement
+CONCLUSION_SENTENCE_PATTERNS = (
+    "concludes",
+    "approaching the end",
+    "any questions for me",
+    "wrap up",
+    "wrapping up",
+    "end of the interview",
+    "end of our time",
+)
+
+
 def _block_wrapup_at_decoder(text: str) -> str:
     """Strip wrap-up sentences and replace with a neutral continuation. Used at decoder level."""
     if not text or not text.strip():
         return text
     lower = text.lower()
-    # Find earliest start of any wrap-up phrase
+    # Find earliest start of any wrap-up phrase so we truncate before any conclusion
     earliest = len(text)
     for phrase in WRAPUP_PHRASES:
         idx = lower.find(phrase)
@@ -74,9 +121,29 @@ def _block_wrapup_at_decoder(text: str) -> str:
         return WRAPUP_REPLACEMENT
     if earliest < len(text):
         out = text[:earliest].rstrip()
+        # Drop any remaining sentence that looks like conclusion (e.g. "This concludes the interview.")
+        sentences = re.split(r"(?<=[.!?])\s+", out)
+        kept = []
+        for s in sentences:
+            s_lower = s.lower()
+            if any(p in s_lower for p in CONCLUSION_SENTENCE_PATTERNS):
+                continue
+            kept.append(s)
+        out = " ".join(kept).strip()
+        if not out:
+            return WRAPUP_REPLACEMENT
         if not out.endswith(".") and not out.endswith("?"):
             out += "."
         return out + " " + WRAPUP_REPLACEMENT
+    return text
+
+
+def _sanitize_transcript_no_conclusion(text: str) -> str:
+    """Ensure transcript never contains conclusion/wrap-up phrases. Replace with safe line if found."""
+    if not text or not text.strip():
+        return text
+    if _contains_wrapup(text):
+        return WRAPUP_REPLACEMENT
     return text
 
 
@@ -476,6 +543,7 @@ class HistoryManagedContextWrapper:
                     # Forward transcript (strip echoed system context so it doesn't show in UI)
                     try:
                         to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                        to_send = _sanitize_transcript_no_conclusion(to_send)
                         if to_send and to_send != self._last_sent_text:
                             await self._transcript_service.send_transcript(to_send)
                             self._last_sent_text = to_send
@@ -484,6 +552,9 @@ class HistoryManagedContextWrapper:
                         logger.error(f"Failed to send transcript: {e}", exc_info=True)
                 
                 self._forwarded = True  # Mark as forwarded even if no unsent text
+                # Guard: count this assistant turn as a question asked
+                if self._accumulated_text and not self._skip_transcript:
+                    increment_questions_asked()
             elif self._skip_transcript:
                 logger.debug("⏭️  Skipping transcript (greeting or flagged)")
             
@@ -512,6 +583,7 @@ class HistoryManagedContextWrapper:
                     if has_unsent:
                         try:
                             to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                            to_send = _sanitize_transcript_no_conclusion(to_send)
                             if to_send and to_send != self._last_sent_text:
                                 await self._transcript_service.send_transcript(to_send)
                             self._last_sent_length = len(self._accumulated_text)
@@ -539,12 +611,12 @@ class HistoryManagedContextWrapper:
                 if chunk_text:
                     self._accumulated_text += chunk_text
                     
-                    # Decoder-level: block wrap-up language — replace with continuation and consume rest
+                    # Decoder-level: block wrap-up language — replace entire response with safe continuation
                     if _contains_wrapup(self._accumulated_text) and not self._wrapup_replacement_yielded:
-                        self._accumulated_text = _block_wrapup_at_decoder(self._accumulated_text)
+                        self._accumulated_text = WRAPUP_REPLACEMENT
                         self._wrapup_replacement_yielded = True
                         self._consuming_rest_after_wrapup = True
-                        logger.info("[DECODER] Wrap-up language blocked; replacing with: %s", WRAPUP_REPLACEMENT)
+                        logger.info("[DECODER] Wrap-up language blocked; entire response replaced with: %s", WRAPUP_REPLACEMENT)
                         # Yield a chunk that TTS will speak (replacement only)
                         class _Chunk:
                             def __init__(self):
@@ -564,6 +636,7 @@ class HistoryManagedContextWrapper:
                         if should_send:
                             try:
                                 to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                                to_send = _sanitize_transcript_no_conclusion(to_send)
                                 if to_send and to_send != self._last_sent_text:
                                     await self._transcript_service.send_transcript(to_send)
                                     self._last_sent_text = to_send
@@ -587,6 +660,7 @@ class HistoryManagedContextWrapper:
                         )
                         try:
                             to_send = _strip_system_context_from_transcript(self._accumulated_text)
+                            to_send = _sanitize_transcript_no_conclusion(to_send)
                             if to_send and to_send != self._last_sent_text:
                                 await self._transcript_service.send_transcript(to_send)
                                 self._last_sent_text = to_send
