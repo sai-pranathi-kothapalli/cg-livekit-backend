@@ -78,7 +78,7 @@ The `_adapt_instructions_for_duration()` method modifies the agent's instruction
 
 ### 10-Minute Interview:
 ```
-Title: "RRB/IBPS Officer Scale-I Interview (10 Minutes)"
+Title: "Technical Interview (10 Minutes)"
 
 Time Tracking:
 - 0-3 min: Background, family, education
@@ -95,7 +95,7 @@ Question Guidance: "You'll only ask approximately 4 questions in this 10-minute 
 
 ### 5-Minute Interview:
 ```
-Title: "RRB/IBPS Officer Scale-I Interview (5 Minutes)"
+Title: "Technical Interview (5 Minutes)"
 
 Time Tracking:
 - 0-1 min: Background, family, education

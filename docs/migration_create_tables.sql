@@ -18,10 +18,10 @@ CREATE TABLE IF NOT EXISTS job_descriptions (
 INSERT INTO job_descriptions (id, title, description, requirements, preparation_areas)
 VALUES (
     '00000000-0000-0000-0000-000000000001',
-    'Regional Rural Bank Probationary Officer (PO)',
-    'We are conducting interviews for the Regional Rural Bank Probationary Officer (PO) position. This is an excellent opportunity to build a career in the banking sector and serve rural communities through financial inclusion and banking services.',
-    'Graduation degree from a recognized university. Knowledge of local language. Computer literacy.',
-    '["Candidate Personal Introduction: Your background, education, and motivation", "Background/History of Regional Rural Bank: Understanding of RRBs, their structure and role", "Current Affairs for Banking: Recent developments in banking sector, RBI policies, government schemes", "Domain Knowledge: Banking fundamentals, operations, and financial awareness"]'::jsonb
+    'Professional Interview',
+    'We are conducting interviews for qualified candidates. This is an opportunity to demonstrate your skills, experience, and suitability for the role.',
+    'Relevant qualifications and experience. Good communication skills. Computer literacy.',
+    '["Personal Introduction: Your background, education, and motivation", "Technical Knowledge: Domain expertise and relevant skills", "Problem Solving: Scenarios and practical thinking", "Domain Knowledge: Fundamentals and industry awareness"]'::jsonb
 )
 ON CONFLICT (id) DO NOTHING;
 

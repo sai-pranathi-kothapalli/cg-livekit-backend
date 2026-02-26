@@ -17,13 +17,25 @@ from datetime import datetime
 from app.config import Config
 from app.db.supabase import get_supabase
 from app.utils.logger import get_logger
-from app.utils.exceptions import AgentError
+from app.utils.exceptions import AgentError, SupabaseUnavailableError
 from app.utils.datetime_utils import get_now_ist
 
 logger = get_logger(__name__)
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
+
+
+def _is_supabase_connectivity_error(exc: Exception) -> bool:
+    """True if the exception is due to Supabase/Cloudflare connectivity (e.g. 525 SSL), not auth logic."""
+    msg = str(exc).lower()
+    if "525" in str(exc) or "ssl handshake" in msg:
+        return True
+    if "502" in str(exc) or "503" in str(exc) or "504" in str(exc):
+        return True
+    if "json could not be generated" in msg and ("<!DOCTYPE html>" in str(exc) or "cloudflare" in msg):
+        return True
+    return False
 
 
 class AuthService:
@@ -110,7 +122,15 @@ class AuthService:
                 }
             return None
         except Exception as e:
-            logger.error(f"[AuthService] Authentication error: {str(e)}", exc_info=True)
+            if _is_supabase_connectivity_error(e):
+                logger.error(
+                    "[AuthService] Supabase/Cloudflare connectivity error (e.g. 525 SSL handshake failed). "
+                    "Check Supabase project SSL and Cloudflare origin settings. Error: %s",
+                    str(e)[:200],
+                )
+                raise SupabaseUnavailableError()
+            else:
+                logger.error(f"[AuthService] Authentication error: {str(e)}", exc_info=True)
             return None
 
     def authenticate_student(self, email: str, password: str) -> Optional[Dict[str, Any]]:
@@ -138,7 +158,15 @@ class AuthService:
                 }
             return None
         except Exception as e:
-            logger.error(f"[AuthService] Authentication error: {str(e)}", exc_info=True)
+            if _is_supabase_connectivity_error(e):
+                logger.error(
+                    "[AuthService] Supabase/Cloudflare connectivity error (e.g. 525 SSL handshake failed). "
+                    "Check Supabase project SSL and Cloudflare origin settings. Error: %s",
+                    str(e)[:200],
+                )
+                raise SupabaseUnavailableError()
+            else:
+                logger.error(f"[AuthService] Authentication error: {str(e)}", exc_info=True)
             return None
 
     def generate_temporary_password(self, length: int = 12) -> str:
@@ -281,9 +309,17 @@ class AuthService:
                 return None
             return response.data[0]
         except Exception as e:
-            logger.error(f"[AuthService] Error fetching user: {str(e)}", exc_info=True)
+            if _is_supabase_connectivity_error(e):
+                logger.error(
+                    "[AuthService] Supabase/Cloudflare connectivity error (e.g. 525 SSL handshake failed). "
+                    "Check Supabase project SSL and Cloudflare origin settings. Error: %s",
+                    str(e)[:200],
+                )
+                raise SupabaseUnavailableError()
+            else:
+                logger.error(f"[AuthService] Error fetching user: {str(e)}", exc_info=True)
             return None
-    
+
     # Aliases for backward compatibility if needed, but better to use get_user_by_id and check role
     def get_student_by_id(self, student_id: str) -> Optional[Dict[str, Any]]:
         user = self.get_user_by_id(student_id)

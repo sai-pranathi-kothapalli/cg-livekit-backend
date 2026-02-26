@@ -302,7 +302,7 @@ class EmailService:
                 <li>The interview window is open for <strong>60 minutes</strong> after the scheduled time</li>
                 <li>Please ensure you have a stable internet connection and a quiet environment</li>
                 <li>You can test your microphone and camera before joining</li>
-                <li>The interview will cover: Personal Introduction, RRB Background, Current Affairs for Banking, and Domain Knowledge</li>
+                <li>The interview will cover: Personal Introduction, Technical Knowledge, and Domain Knowledge</li>
             </ul>
             
             <p style="font-size: 12px; color: #999; margin-top: 20px;">

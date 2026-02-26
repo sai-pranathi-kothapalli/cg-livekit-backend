@@ -87,3 +87,10 @@ class AgentError(ApplicationError):
         error_code = f"AGENT_ERROR_{agent_name.upper()}"
         super().__init__(message, error_code, 503)
 
+
+class SupabaseUnavailableError(ApplicationError):
+    """Raised when Supabase/Cloudflare is unreachable (e.g. 525 SSL handshake failed)."""
+
+    def __init__(self, message: str = "Database temporarily unavailable. Please try again."):
+        super().__init__(message, "SERVICE_UNAVAILABLE", 503)
+

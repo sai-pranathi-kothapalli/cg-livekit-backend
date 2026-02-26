@@ -88,7 +88,7 @@ Agent: [Responds with greeting and introduction]
 
 ### Interview Test
 ```
-You: "I am applying for the RRB PO position"
+You: "I am ready to begin the interview"
 Agent: [Starts interview process]
 ```
 

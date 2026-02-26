@@ -15,6 +15,7 @@ from app.services.container import (
 )
 from app.utils.logger import get_logger
 from app.utils.limiter import limiter
+from app.utils.exceptions import SupabaseUnavailableError
 
 logger = get_logger(__name__)
 
@@ -85,6 +86,11 @@ async def login(request: Request, body: LoginRequest):
       error="Invalid credentials"
     )
 
+  except SupabaseUnavailableError as e:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail=e.message,
+    )
   except Exception as e:
     logger.error(f"[API] Login error: {str(e)}", exc_info=True)
     return LoginResponse(

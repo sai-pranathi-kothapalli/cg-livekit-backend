@@ -38,8 +38,7 @@ def reset_questions_asked() -> None:
     _questions_asked = 0
 
 
-# Decoder-level: block wrap-up language so model cannot end the interview on its own
-WRAPUP_REPLACEMENT = "Let me ask you one more question."
+# Decoder-level: strip wrap-up language; never replace with a static filler (no "Let me ask you one more question.")
 # Order matters for earliest match: stronger conclusion phrases first so we truncate before "Okay. This concludes..."
 WRAPUP_PHRASES = (
     "this concludes the interview",
@@ -100,7 +99,11 @@ CONCLUSION_SENTENCE_PATTERNS = (
 
 
 def _block_wrapup_at_decoder(text: str) -> str:
-    """Strip wrap-up sentences and replace with a neutral continuation. Used at decoder level."""
+    """
+    Strip wrap-up sentences only. Do NOT replace with any static filler.
+    If remaining content is empty, return "" so caller can treat as no valid question.
+    Used at decoder level and for transcript sanitization.
+    """
     if not text or not text.strip():
         return text
     lower = text.lower()
@@ -118,7 +121,7 @@ def _block_wrapup_at_decoder(text: str) -> str:
                 idx = cut + 1
             earliest = min(earliest, idx)
     if earliest == 0:
-        return WRAPUP_REPLACEMENT
+        return ""
     if earliest < len(text):
         out = text[:earliest].rstrip()
         # Drop any remaining sentence that looks like conclusion (e.g. "This concludes the interview.")
@@ -131,19 +134,22 @@ def _block_wrapup_at_decoder(text: str) -> str:
             kept.append(s)
         out = " ".join(kept).strip()
         if not out:
-            return WRAPUP_REPLACEMENT
+            return ""
         if not out.endswith(".") and not out.endswith("?"):
             out += "."
-        return out + " " + WRAPUP_REPLACEMENT
+        return out
     return text
 
 
 def _sanitize_transcript_no_conclusion(text: str) -> str:
-    """Ensure transcript never contains conclusion/wrap-up phrases. Replace with safe line if found."""
+    """
+    Remove wrap-up/conclusion phrases only. Do NOT replace with a static line.
+    If nothing remains after stripping, return "" so no filler is sent; next turn will generate a real question.
+    """
     if not text or not text.strip():
         return text
     if _contains_wrapup(text):
-        return WRAPUP_REPLACEMENT
+        return _block_wrapup_at_decoder(text)
     return text
 
 
@@ -151,7 +157,14 @@ def _strip_system_context_from_transcript(text: str) -> str:
     """
     Remove echoed time-context / rule text from agent response so it does not
     appear in the user-facing transcript (TIME REMAINING, RULE:, etc.).
+    Also strips any [INTERNAL ... END INTERNAL CONTEXT ...] blocks that slipped
+    through the stream filter (e.g. from non-streaming transcript paths).
     """
+    if not text or not text.strip():
+        return text
+    # First strip any [INTERNAL] blocks (injected per-turn time context).
+    # These are the primary source of leaked system messages in recent versions.
+    text = _strip_internal_blocks(text)
     if not text or not text.strip():
         return text
     # Remove leading block: from "TIME REMAINING" up to (but not including) actual reply
@@ -482,6 +495,58 @@ class HistoryManagedLLMWrapper:
         )
 
 
+_INTERNAL_START = "[INTERNAL"
+_INTERNAL_END = "[END INTERNAL CONTEXT"
+# Gemini sometimes echoes the body of the [INTERNAL] block without the opening [INTERNAL] tag.
+# "PHASE LOCK —" is the distinctive first line of the block body — treat it as an alternative start.
+_PHASE_LOCK_START = "PHASE LOCK —"
+
+
+def _strip_internal_blocks(text: str) -> str:
+    """
+    Remove all [INTERNAL...][END INTERNAL CONTEXT...] blocks from text.
+    Also handles the case where Gemini echoes the block body starting from "PHASE LOCK —"
+    (i.e. the [INTERNAL] opening tag was skipped but the body and closing tag are present).
+    Used for transcript sanitisation. For the real-time stream filter see __anext__.
+    """
+    if not text:
+        return text
+    # Pass 1: strip normal [INTERNAL...][END INTERNAL CONTEXT...] blocks.
+    if _INTERNAL_START in text:
+        result = []
+        remaining = text
+        while _INTERNAL_START in remaining:
+            start_idx = remaining.find(_INTERNAL_START)
+            result.append(remaining[:start_idx])
+            remaining = remaining[start_idx:]
+            end_idx = remaining.find(_INTERNAL_END)
+            if end_idx == -1:
+                remaining = ""
+                break
+            close_bracket = remaining.find("]", end_idx + len(_INTERNAL_END))
+            if close_bracket == -1:
+                remaining = ""
+                break
+            remaining = remaining[close_bracket + 1:].lstrip("\n")
+        result.append(remaining)
+        text = "".join(result)
+    # Pass 2: strip "headerless" blocks — Gemini skipped [INTERNAL] but kept body + footer.
+    # Any "PHASE LOCK —" up to [END INTERNAL CONTEXT...] is internal content that leaked.
+    while _PHASE_LOCK_START in text and _INTERNAL_END in text:
+        pl_idx = text.find(_PHASE_LOCK_START)
+        end_idx = text.find(_INTERNAL_END, pl_idx)
+        if end_idx == -1:
+            # No closing tag after PHASE LOCK — strip from PHASE LOCK to end of string.
+            text = text[:pl_idx].rstrip()
+            break
+        close_bracket = text.find("]", end_idx + len(_INTERNAL_END))
+        if close_bracket == -1:
+            text = text[:pl_idx].rstrip()
+            break
+        text = text[:pl_idx].rstrip() + text[close_bracket + 1:].lstrip("\n")
+    return text
+
+
 class HistoryManagedContextWrapper:
     """
     Context manager wrapper that tracks assistant responses
@@ -508,6 +573,11 @@ class HistoryManagedContextWrapper:
         # Decoder-level wrap-up block
         self._wrapup_replacement_yielded = False
         self._consuming_rest_after_wrapup = False
+        # Decoder-level [INTERNAL] block filter
+        # Strips [INTERNAL...][END INTERNAL CONTEXT...] from the LLM output stream
+        # before it reaches TTS, so the agent never reads out internal time-context messages.
+        self._internal_block_active = False   # currently inside an [INTERNAL] block
+        self._internal_block_carry = ""       # buffered text while scanning for end marker
     
     async def __aenter__(self):
         """Enter the original context manager"""
@@ -518,6 +588,8 @@ class HistoryManagedContextWrapper:
         self._conversation_id = id(self)
         self._wrapup_replacement_yielded = False
         self._consuming_rest_after_wrapup = False
+        self._internal_block_active = False
+        self._internal_block_carry = ""
         
         logger.debug(f"[DEBUG] History-managed wrapper entering (conversation_id: {self._conversation_id})")
         result = await self._cm.__aenter__()
@@ -606,24 +678,84 @@ class HistoryManagedContextWrapper:
                     chunk_text = chunk
                 elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
                     chunk_text = chunk.delta.content
-                
+
+                # --- [INTERNAL] block real-time filter ---
+                # Strip [INTERNAL ... END INTERNAL CONTEXT ...] blocks before TTS receives them.
+                # Uses per-stream state (_internal_block_active, _internal_block_carry) to
+                # correctly handle blocks that span multiple streaming chunks.
+                if chunk_text:
+                    combined = self._internal_block_carry + chunk_text
+                    self._internal_block_carry = ""
+
+                    if self._internal_block_active:
+                        # Currently inside an [INTERNAL] block — scan for the closing END marker.
+                        end_idx = combined.find(_INTERNAL_END)
+                        if end_idx == -1:
+                            # End marker not yet arrived — buffer everything, yield nothing.
+                            self._internal_block_carry = combined
+                            chunk_text = ""
+                        else:
+                            close_bracket = combined.find("]", end_idx + len(_INTERNAL_END))
+                            if close_bracket == -1:
+                                # Partial closing bracket — buffer from the end marker and wait.
+                                self._internal_block_carry = combined[end_idx:]
+                                chunk_text = ""
+                            else:
+                                # Block fully closed — text after the closing ']' is real content.
+                                self._internal_block_active = False
+                                after = combined[close_bracket + 1:].lstrip("\n")
+                                # Run through _strip_internal_blocks in case there are nested blocks.
+                                chunk_text = _strip_internal_blocks(after)
+                    else:
+                        start_idx = combined.find(_INTERNAL_START)
+                        pl_idx = combined.find(_PHASE_LOCK_START)
+                        # Determine the effective start: whichever marker appears first.
+                        if start_idx != -1 and (pl_idx == -1 or start_idx <= pl_idx):
+                            # Primary [INTERNAL] marker found.
+                            before = combined[:start_idx]
+                            after_start = combined[start_idx:]
+                            end_idx = after_start.find(_INTERNAL_END)
+                            if end_idx == -1:
+                                # Block opens but has no closing marker yet — go active.
+                                self._internal_block_active = True
+                                self._internal_block_carry = after_start  # buffer the open block
+                                chunk_text = before  # yield only the text before the block
+                            else:
+                                # Both open and close present in this chunk — strip all blocks.
+                                chunk_text = _strip_internal_blocks(combined)
+                        elif pl_idx != -1:
+                            # "PHASE LOCK —" found — Gemini echoed the body without [INTERNAL] header.
+                            before = combined[:pl_idx]
+                            after_start = combined[pl_idx:]
+                            end_idx = after_start.find(_INTERNAL_END)
+                            if end_idx == -1:
+                                # No closing tag yet — go active, buffer from PHASE LOCK.
+                                self._internal_block_active = True
+                                self._internal_block_carry = after_start
+                                chunk_text = before
+                            else:
+                                # Both PHASE LOCK body and closing tag in this chunk — strip.
+                                chunk_text = _strip_internal_blocks(combined)
+                        else:
+                            # No [INTERNAL] block in this chunk — pass through (with any carry prepended).
+                            chunk_text = combined
+
+                    # Patch the chunk in-place so TTS / downstream only receives filtered text.
+                    if hasattr(chunk, 'content') and chunk.content is not None:
+                        chunk.content = chunk_text
+                    elif hasattr(chunk, 'text') and chunk.text is not None:
+                        chunk.text = chunk_text
+                    elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
+                        chunk.delta.content = chunk_text
+
                 # Accumulate text
                 if chunk_text:
                     self._accumulated_text += chunk_text
-                    
-                    # Decoder-level: block wrap-up language — replace entire response with safe continuation
-                    if _contains_wrapup(self._accumulated_text) and not self._wrapup_replacement_yielded:
-                        self._accumulated_text = WRAPUP_REPLACEMENT
-                        self._wrapup_replacement_yielded = True
-                        self._consuming_rest_after_wrapup = True
-                        logger.info("[DECODER] Wrap-up language blocked; entire response replaced with: %s", WRAPUP_REPLACEMENT)
-                        # Yield a chunk that TTS will speak (replacement only)
-                        class _Chunk:
-                            def __init__(self):
-                                self.content = WRAPUP_REPLACEMENT
-                                self.text = WRAPUP_REPLACEMENT
-                        return _Chunk()
-                    
+
+                    # Do NOT strip wrap-up mid-stream (fixes half-sentence "Thank you for your...").
+                    # Backend sends END_INTERVIEW for the only allowed goodbye; time context forbids early thank/goodbye.
+                    # Only filter full goodbye in transcript send below if needed; pass full chunk to TTS.
+
                     # Send incremental transcript (skip if flag is set)
                     if not self._skip_transcript:
                         new_chars = len(self._accumulated_text) - self._last_sent_length

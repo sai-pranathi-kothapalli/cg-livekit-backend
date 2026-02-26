@@ -26,17 +26,17 @@ from app.utils.exceptions import AgentError
 
 logger = get_logger(__name__)
 
-# Labels that start the *next* field in IBPS RRB forms. Used to stop capture so we don't merge fields.
+# Labels that start the *next* field in application forms. Used to stop capture so we don't merge fields.
 _NEXT_FIELD_LABELS = (
     "Post", "Category", "Date of Birth", "DOB", "D.O.B", "Age completed", "Age as on",
     "Gender", "Marital Status", "Aadhaar", "Aadhaar Card", "Consent to Aadhaar",
     "PAN", "PAN Card", "Do you have twin", "Father's Name", "Mother's Name", "Spouse's Name",
     "Address", "Correspondence", "Permanent Address", "State", "District", "Pincode", "Pin Code",
     "SSC", "Graduation", "Degree", "College", "Board", "Religion", "Mobile", "Phone",
-    "Regional Rural Bank", "RRB", "Exam Center", "Medium of Paper",
+    "Exam Center", "Medium of Paper",
 )
 
-# Section headers in resumes and IBPS RRB / CRP application forms.
+# Section headers in resumes and application forms.
 # Each tuple: (chunk_key, regex_pattern). Pattern is used to find section start (case-insensitive).
 _SECTION_HEADERS = (
     ("personal", re.compile(r"Personal\s+Details?|Contact\s+Info", re.IGNORECASE)),
@@ -396,7 +396,7 @@ class ResumeService:
 
     def _chunk_by_sections(self, text: str) -> Dict[str, str]:
         """
-        Split normalized text into sections by IBPS RRB form headers.
+        Split normalized text into sections by application form headers.
         Returns dict: personal, correspondence_address, permanent_address, education, other.
         Each value is the text from that section header up to the next section (or end).
         Falls back to full text for a key if section not found.
@@ -605,12 +605,6 @@ class ResumeService:
             )
         if state_applying:
             out["state_applying_for"] = state_applying
-
-        rrb = self._extract_label_value(other, ("Regional Rural Bank", "RRB", "Bank Name", "Name of RRB"))
-        if not rrb:
-            rrb = self._extract_label_value(text_clean, ("Regional Rural Bank", "RRB", "Bank Name", "Name of RRB"))
-        if rrb:
-            out["regional_rural_bank"] = rrb
 
         exam1 = self._extract_label_value(other, ("Exam Center Preference 1", "Exam Center 1", "Centre Preference 1"))
         if not exam1:
