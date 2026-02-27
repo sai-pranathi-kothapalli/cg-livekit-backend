@@ -83,6 +83,34 @@ class AuthService:
         except jwt.InvalidTokenError:
             return None
 
+    def authenticate_unified(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
+        try:
+            # Optimization: 1 DB query instead of 2. We use separate requests for robust special char handling
+            # if the OR query becomes problematic with quotes, but checking by email or username works best:
+            if "@" in identifier:
+                response = self.client.table("users").select("*").eq("email", identifier).execute()
+            else:
+                response = self.client.table("users").select("*").eq("username", identifier).execute()
+                if not response.data:
+                    # Fallback check in case someone inputs an email without @ or username logic shifts
+                    response = self.client.table("users").select("*").eq("email", identifier).execute()
+
+            if not response.data:
+                logger.warning(f"[AuthService] User not found: {identifier}")
+                return None
+                
+            for user in response.data:
+                password_hash = user.get("password_hash")
+                if password_hash and self.verify_password(password, password_hash):
+                    logger.info(f"[AuthService] ✅ User authenticated: {identifier}")
+                    return user
+            return None
+        except Exception as e:
+            if _is_supabase_connectivity_error(e):
+                raise SupabaseUnavailableError()
+            logger.error(f"[AuthService] Authentication error: {str(e)}", exc_info=True)
+            return None
+
     def authenticate_admin(self, username: str, password: str) -> Optional[Dict[str, Any]]:
         try:
             # Query users table for admin or manager with username

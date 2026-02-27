@@ -25,7 +25,7 @@ router = APIRouter(tags=["Auth"])
 
 @router.post("/login", response_model=LoginResponse)
 @limiter.limit("15/minute")
-async def login(request: Request, body: LoginRequest):
+def login(request: Request, body: LoginRequest):
   """
   Unified login endpoint - automatically detects admin or student.
   Rate limited to 15 requests per minute per IP.
@@ -33,51 +33,51 @@ async def login(request: Request, body: LoginRequest):
   try:
     logger.info(f"[API] Login attempt: {body.username}")
 
-    # Try admin authentication first
-    admin_user = auth_service.authenticate_admin(body.username, body.password)
-    if admin_user:
-      token = auth_service.generate_token(
-        user_id=admin_user['id'],
-        role=admin_user['role'],
-        username=admin_user['username']
-      )
-      logger.info(f"[API] ✅ {admin_user['role'].capitalize()} login successful: {body.username}")
-      return LoginResponse(
-        success=True,
-        token=token,
-        user={
-          'id': admin_user['id'],
-          'username': admin_user['username'],
-          'role': admin_user['role'],
-          'email': admin_user.get('email'),
-          'name': admin_user.get('name'),
-        },
-        must_change_password=False
-      )
-
-    # Try student authentication (email-based)
-    student_user = auth_service.authenticate_student(body.username, body.password)
-    if student_user:
-      token = auth_service.generate_token(
-        user_id=student_user['id'],
-        role='student',
-        email=student_user['email']
-      )
-      logger.info(f"[API] ✅ Student login successful: {body.username}")
-      must_change_password = student_user.get('must_change_password', False)
-      return LoginResponse(
-        success=True,
-        token=token,
-        user={
-          'id': student_user['id'],
-          'email': student_user['email'],
-          'name': student_user.get('name'),
-          'phone': student_user.get('phone'),
-          'role': 'student',
-          'username': student_user['email'],
-        },
-        must_change_password=must_change_password
-      )
+    # Unified authentication -> single database round trip
+    user = auth_service.authenticate_unified(body.username, body.password)
+    
+    if user:
+      role = user.get('role', 'student')
+      if role in ['admin', 'manager']:
+        token = auth_service.generate_token(
+          user_id=user['id'],
+          role=role,
+          username=user.get('username') or user.get('email')
+        )
+        logger.info(f"[API] ✅ {role.capitalize()} login successful: {body.username}")
+        return LoginResponse(
+          success=True,
+          token=token,
+          user={
+            'id': user['id'],
+            'username': user.get('username') or user.get('email'),
+            'role': role,
+            'email': user.get('email'),
+            'name': user.get('name'),
+          },
+          must_change_password=user.get('must_change_password', False)
+        )
+      else:
+        # Student
+        token = auth_service.generate_token(
+          user_id=user['id'],
+          role='student',
+          email=user['email']
+        )
+        logger.info(f"[API] ✅ Student login successful: {body.username}")
+        return LoginResponse(
+          success=True,
+          token=token,
+          user={
+            'id': user['id'],
+            'email': user['email'],
+            'name': user.get('name'),
+            'phone': user.get('phone'),
+            'role': 'student',
+            'username': user['email'],
+          },
+          must_change_password=user.get('must_change_password', False)
+        )
 
     # Authentication failed
     logger.warning(f"[API] Login failed: {body.username}")
