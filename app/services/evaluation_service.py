@@ -268,78 +268,148 @@ class EvaluationService:
     def _format_transcript_for_analysis(self, transcript: List[Dict[str, Any]]) -> str:
         """Format transcript into readable text for AI analysis."""
         lines = []
-        for i, msg in enumerate(transcript):
+        for msg in transcript:
             role = msg.get('role', 'unknown')
             content = msg.get('content', '')
+            timestamp = msg.get('timestamp', '')
             
+            # Simple timestamp formatting if it's a long string
+            ts_str = ""
+            if timestamp:
+                try:
+                    # If it's ISO format, take the time part
+                    if 'T' in str(timestamp):
+                        ts_str = f"[{str(timestamp).split('T')[1][:8]}] "
+                except:
+                    pass
+
             if role == 'assistant':
-                lines.append(f"[Interviewer]: {content}")
+                lines.append(f"{ts_str}[Interviewer]: {content}")
             elif role == 'user':
-                lines.append(f"[Candidate]: {content}")
+                lines.append(f"{ts_str}[Candidate]: {content}")
             else:
-                lines.append(f"[{role.title()}]: {content}")
+                lines.append(f"{ts_str}[{role.title()}]: {content}")
         
-        return "\\n".join(lines)
+        return "\n".join(lines)
     
     def _create_evaluation_prompt(
         self,
         transcript_text: str,
         interview_state: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Create prompt for AI evaluation analysis."""
+        """Create prompt for AI evaluation analysis based on expert evaluator requirements."""
         
-        # Extract round information if available
+        # 1. Format Violations Log
+        violations_log = "None"
+        violations = (interview_state or {}).get("violations", [])
+        if violations:
+            violations_log = "\n".join([
+                f"- [{v.get('timestamp')}] {v.get('alert_type')}: {v.get('message')}"
+                for v in violations
+            ])
+
+        # 2. Format Coding Submissions
+        coding_data = "None"
+        code_submissions = (interview_state or {}).get("code_submissions", [])
+        if code_submissions:
+            coding_data = "\n\n".join([
+                f"### Coding Question: {cs.get('question')}\n"
+                f"Language: {cs.get('language')}\n"
+                f"Timestamp: {cs.get('timestamp')}\n"
+                f"--- SUBMITTED CODE ---\n{cs.get('code')}\n--- END CODE ---\n"
+                f"Execution Output: {cs.get('execution_output')}\n"
+                f"Initial AI Verdict: {cs.get('ai_verdict')}"
+                for cs in code_submissions
+            ])
+
+        # 3. Extract Round Data for context
         rounds_info = ""
         if interview_state and 'response_ratings' in interview_state:
-            rounds_info = "\\n\\nRound Performance Data:\\n"
+            rounds_info = "\nRound Performance Data:\n"
             for round_name, ratings in interview_state.get('response_ratings', {}).items():
                 if ratings:
                     avg = sum(ratings) / len(ratings)
-                    rounds_info += f"- {round_name}: {len(ratings)} responses, avg rating: {avg:.1f}/10\\n"
-        
-        prompt = f"""Analyze the following interview transcript and provide a comprehensive evaluation.
+                    rounds_info += f"- {round_name}: {len(ratings)} questions, avg rating: {avg:.1f}/10\n"
 
-Interview Transcript:
+        prompt = f"""You are an expert technical interview evaluator and behavioral analyst. 
+Analyze the following interview data and produce a detailed, honest, and structured candidate evaluation report.
+
+---
+## INPUT DATA:
+1. Full interview transcript:
 {transcript_text}
-{rounds_info}
 
-Please provide a detailed evaluation in the following JSON format:
+2. Proctoring violation log:
+{violations_log}
+
+3. Coding submissions:
+{coding_data}
+
+{rounds_info}
+---
+
+## YOUR EVALUATION TASKS:
+
+### SECTION 1: INTEGRITY ANALYSIS
+Analyze for signs of dishonesty, external help, or coaching. Flag unusually long pauses, textbook-perfect answers inconsistent with tone, and overlap with proctoring alerts.
+
+### SECTION 2: TECHNICAL KNOWLEDGE EVALUATION
+Evaluate correctness, depth of understanding, knowledge of edge cases, and consistency for each topic.
+
+### SECTION 3: COMMUNICATION SKILLS
+Assess clarity, structure, confidence, brevity, and active listening.
+
+### SECTION 4: PROBLEM SOLVING BEHAVIOR
+Analyze clarified questions, thinking out loud, logical progression, and self-review.
+
+### SECTION 5: BEHAVIORAL & SOFT SKILLS
+Evaluate handling of pressure, attitude, and ownership of knowledge gaps.
+
+### SECTION 6: PROCTORING VIOLATION SUMMARY
+Classify violations (MINOR/MODERATE/SEVERE) and identify if they coincide with hard questions.
+
+### SECTION 7: CODING QUESTION EVALUATION
+Evaluate correctness, quality, complexity (Big O), and problem-solving approach. Perform deep integrity analysis on code (suspiciously perfect code vs. human-like minor errors).
+
+---
+
+## OUTPUT FORMAT:
+Your final response MUST be a single JSON object with the following structure. The "overall_feedback" field MUST contain the full Markdown-formatted report following the structure outlined in the user's request.
+
 {{
-    "overall_score": <number between 0-10>,
-    "strengths": [
-        "<specific strength 1>",
-        "<specific strength 2>",
-        "<specific strength 3>"
-    ],
-    "areas_for_improvement": [
-        "<specific area 1>",
-        "<specific area 2>",
-        "<specific area 3>"
-    ],
+    "overall_score": <number 1-10>,
+    "integrity_score": <number 1-10>,
+    "technical_knowledge": <number 1-10>,
+    "communication_quality": <number 1-10>,
+    "problem_solving": <number 1-10>,
+    "behavioral_score": <number 1-10>,
+    "coding_score": <number 1-10>,
+    "integrity_verdict": "CLEAN" | "SUSPICIOUS" | "HIGH RISK",
+    "hire_recommendation": "STRONG HIRE" | "HIRE" | "NEEDS FURTHER EVALUATION" | "DO NOT HIRE",
+    "strengths": ["list", "of", "strengths"],
+    "areas_for_improvement": ["list", "of", "areas"],
+    "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY...",
     "rounds_analysis": [
         {{
-            "round_name": "<round name>",
-            "performance_summary": "<brief summary of performance in this round>",
-            "topics_covered": ["<topic1>", "<topic2>"],
-            "average_rating": <number 0-10>,
-            "strengths": ["<strength>"],
-            "improvements": ["<improvement>"]
+            "round_name": "...",
+            "performance_summary": "...",
+            "topics_covered": [],
+            "average_rating": <number>
         }}
-    ],
-    "communication_quality": <number 0-10>,
-    "technical_knowledge": <number 0-10>,
-    "problem_solving": <number 0-10>,
-    "overall_feedback": "<comprehensive feedback paragraph>"
+    ]
 }}
 
-Evaluation Criteria:
-1. Communication Skills: Clarity, articulation, confidence
-2. Technical Knowledge: Depth of understanding, accuracy
-3. Problem Solving: Analytical thinking, practical solutions
-4. Engagement: Active participation, question understanding
-5. Professionalism: Demeanor, attitude, preparation
+The "overall_feedback" markdown MUST include:
+1. ### CANDIDATE SUMMARY
+2. ### SCORECARD (as a markdown table)
+3. ### HIRE RECOMMENDATION
+4. ### REASONING
+5. ### RED FLAGS (if any)
+6. ### STRENGTHS
+7. ### AREAS OF CONCERN
+8. ### CODING EVALUATION (per question data and scorecard)
 
-Be specific and constructive. Base scores on actual performance in the transcript."""
+Be objective, evidence-based, and reference specific timestamps or quotes."""
         
         return prompt
     
