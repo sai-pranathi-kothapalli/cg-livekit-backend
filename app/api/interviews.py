@@ -63,10 +63,22 @@ async def get_evaluation(token: str):
         # recalculate a full evaluation from the transcript.
         if transcript and (not evaluation or evaluation.get("overall_score") is None):
             logger.info(f"[API] Evaluation missing or incomplete for {token}, recalculating from transcript...")
+            
+            # Extract interview_state from existing evaluation if available
+            existing_interview_state = None
+            existing_token_usage = None
+            if evaluation:
+                existing_interview_state = evaluation.get("interview_state")
+                if existing_interview_state:
+                    scores = existing_interview_state.get("scores") or {}
+                    existing_token_usage = scores.get("token_usage")
+            
             evaluation_id = evaluation_service.calculate_evaluation_from_transcript(
                 booking_token=token,
                 room_name=booking.get('room_name') or f"room_{token}",
                 transcript=transcript,
+                interview_state=existing_interview_state,
+                token_usage=existing_token_usage,
             )
             if evaluation_id:
                 evaluation = evaluation_service.get_evaluation(token)
@@ -93,12 +105,12 @@ async def get_evaluation(token: str):
 
         # Format rounds
         rounds: List[RoundEvaluationResponse] = []
-        if evaluation and evaluation.get("rounds"):
-            for round_data in evaluation["rounds"]:
+        if evaluation and evaluation.get("rounds_data"):
+            for round_data in evaluation["rounds_data"]:
                 rounds.append(RoundEvaluationResponse(
                     round_number=round_data.get("round_number", 0),
                     round_name=round_data.get("round_name", ""),
-                    questions_asked=round_data.get("questions_asked", 0),
+                    questions_asked=round_data.get("questions_count", 0),
                     average_rating=round_data.get("average_rating"),
                     time_spent_minutes=round_data.get("time_spent_minutes"),
                     time_target_minutes=round_data.get("time_target_minutes"),
@@ -106,6 +118,15 @@ async def get_evaluation(token: str):
                     performance_summary=round_data.get("performance_summary"),
                     response_ratings=round_data.get("response_ratings", []),
                 ))
+
+        # Extract scores from interview_state["scores"] if available
+        interview_state = (evaluation.get("interview_state") or {}) if evaluation else {}
+        scores = interview_state.get("scores") or {}
+        
+        # Debug logging to verify data structure
+        logger.info(f"[DEBUG] evaluation keys: {list(evaluation.keys()) if evaluation else 'None'}")
+        logger.info(f"[DEBUG] interview_state keys: {list(interview_state.keys()) if interview_state else 'None'}")
+        logger.info(f"[DEBUG] scores: {scores}")
 
         return EvaluationResponse(
             booking=booking,
@@ -116,11 +137,11 @@ async def get_evaluation(token: str):
             strengths=evaluation.get("strengths", []) if evaluation else [],
             areas_for_improvement=evaluation.get("areas_for_improvement", []) if evaluation else [],
             transcript=transcript,
-            communication_quality=evaluation.get("communication_quality") if evaluation else None,
-            technical_knowledge=evaluation.get("technical_knowledge") if evaluation else None,
-            problem_solving=evaluation.get("problem_solving") if evaluation else None,
-            overall_feedback=evaluation.get("overall_feedback") if evaluation else None,
-            token_usage=evaluation.get("token_usage") if evaluation else None,
+            communication_quality=scores.get("communication_quality"),
+            technical_knowledge=scores.get("technical_knowledge"),
+            problem_solving=scores.get("problem_solving"),
+            overall_feedback=scores.get("overall_feedback"),
+            token_usage=scores.get("token_usage"),
         )
 
     except HTTPException:

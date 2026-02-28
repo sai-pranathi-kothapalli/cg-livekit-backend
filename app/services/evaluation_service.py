@@ -6,6 +6,7 @@ Uses AI (Google Gemini) to analyze transcripts and generate detailed feedback.
 """
 
 import json
+import re
 import asyncio
 import uuid
 from typing import List, Dict, Any, Optional
@@ -61,24 +62,39 @@ class EvaluationService:
             Evaluation ID if successful, None otherwise
         """
         try:
+            # Prepare interview_state with additional scores/feedback stored in JSON
+            if interview_state is None:
+                interview_state = {}
+            
+            # Store additional fields in interview_state["scores"] to preserve data
+            if communication_quality is not None or technical_knowledge is not None or \
+               problem_solving is not None or overall_feedback is not None or token_usage is not None:
+                if "scores" not in interview_state:
+                    interview_state["scores"] = {}
+                
+                if communication_quality is not None:
+                    interview_state["scores"]["communication_quality"] = float(communication_quality)
+                if technical_knowledge is not None:
+                    interview_state["scores"]["technical_knowledge"] = float(technical_knowledge)
+                if problem_solving is not None:
+                    interview_state["scores"]["problem_solving"] = float(problem_solving)
+                if overall_feedback is not None:
+                    interview_state["scores"]["overall_feedback"] = overall_feedback
+                if token_usage is not None:
+                    interview_state["scores"]["token_usage"] = token_usage
+            
+            # Only include columns that exist in the evaluations table
             evaluation_data = {
                 "booking_token": booking_token,
+                "room_name": room_name,
+                "duration_minutes": duration_minutes,
+                "total_questions": total_questions,
+                "rounds_completed": rounds_completed,
                 "overall_score": float(overall_score) if overall_score is not None else None,
+                "rounds_data": rounds_data or [],
                 "strengths": strengths or [],
                 "areas_for_improvement": areas_for_improvement or [],
-                "rounds": rounds_data or [],
-                "communication_quality": float(communication_quality) if communication_quality is not None else None,
-                "technical_knowledge": float(technical_knowledge) if technical_knowledge is not None else None,
-                "problem_solving": float(problem_solving) if problem_solving is not None else None,
-                "overall_feedback": overall_feedback,
-                "interview_metrics": {
-                    "duration_minutes": duration_minutes,
-                    "total_questions": total_questions,
-                    "rounds_completed": rounds_completed,
-                    "room_name": room_name,
-                    "interview_state": interview_state
-                },
-                "token_usage": token_usage,
+                "interview_state": interview_state,
                 "updated_at": get_now_ist().isoformat(),
             }
             
@@ -107,14 +123,29 @@ class EvaluationService:
     
     async def update_token_usage(self, booking_token: str, token_usage: Dict[str, int]) -> bool:
         """
-        Update token usage for a booking.
+        Update token usage for a booking by storing it in interview_state["scores"]["token_usage"].
         """
         try:
-            response = self.client.table("evaluations").update({
-                "token_usage": token_usage
+            # Get existing evaluation to preserve interview_state
+            response = self.client.table("evaluations").select("interview_state").eq("booking_token", booking_token).execute()
+            
+            if not response.data:
+                logger.warning(f"No evaluation found for booking {booking_token}")
+                return False
+            
+            # Update interview_state with token_usage
+            interview_state = response.data[0].get("interview_state") or {}
+            if "scores" not in interview_state:
+                interview_state["scores"] = {}
+            interview_state["scores"]["token_usage"] = token_usage
+            
+            # Update only interview_state and updated_at
+            update_response = self.client.table("evaluations").update({
+                "interview_state": interview_state,
+                "updated_at": get_now_ist().isoformat(),
             }).eq("booking_token", booking_token).execute()
             
-            if response.data:
+            if update_response.data:
                 logger.info(f"✅ Updated token usage for booking {booking_token}")
                 return True
             return False
@@ -195,14 +226,18 @@ class EvaluationService:
         Returns:
             Dictionary with evaluation data or None if analysis fails
         """
+        logger.info("🔍 [GEMINI-DEBUG] Starting Gemini API analysis...")
+        logger.info(f"🔍 [GEMINI-DEBUG] Transcript length: {len(transcript) if transcript else 0}")
+        
         if not HTTPX_AVAILABLE:
-            logger.warning("httpx not available, skipping AI analysis")
+            logger.warning("❌ [GEMINI-DEBUG] httpx not available, skipping AI analysis")
             return None
         
         if not self.config.gemini_llm.api_key:
-            logger.debug("Gemini API key not set, using fallback evaluation")
+            logger.warning("❌ [GEMINI-DEBUG] Gemini API key not set, using fallback evaluation")
             return None
         
+        logger.info("✅ [GEMINI-DEBUG] HTTPX available and API key set, proceeding with analysis...")
         try:
             transcript_text = self._format_transcript_for_analysis(transcript)
             prompt = self._create_evaluation_prompt(transcript_text, interview_state)
@@ -213,7 +248,10 @@ class EvaluationService:
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
             )
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            logger.info(f"🌐 [GEMINI-DEBUG] Calling Gemini API: {url}")
+            logger.info(f"🌐 [GEMINI-DEBUG] Prompt length: {len(full_prompt)} characters")
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                logger.info("🌐 [GEMINI-DEBUG] Sending POST request to Gemini API...")
                 response = await client.post(
                     url,
                     headers={
@@ -225,8 +263,10 @@ class EvaluationService:
                         "generationConfig": {"temperature": 0.3},
                     },
                 )
+                logger.info(f"🌐 [GEMINI-DEBUG] Response status: {response.status_code}")
                 response.raise_for_status()
                 data = response.json()
+                logger.info("🌐 [GEMINI-DEBUG] Response received, parsing JSON...")
             
             # Log token usage (Gemini returns usageMetadata)
             usage = data.get("usageMetadata") or {}
@@ -246,24 +286,151 @@ class EvaluationService:
                 cand = data["candidates"][0]
                 if "content" in cand and "parts" in cand["content"] and cand["content"]["parts"]:
                     content = cand["content"]["parts"][0].get("text", "")
+                    logger.info(f"📝 [GEMINI-DEBUG] Extracted content length: {len(content)} characters")
             if not content:
-                logger.warning("No content in Gemini API response")
+                logger.warning("❌ [GEMINI-DEBUG] No content in Gemini API response")
                 return None
             try:
+                logger.info("📝 [GEMINI-DEBUG] Parsing JSON from response...")
                 if "```json" in content:
                     content = content.split("```json")[1].split("```")[0].strip()
                 elif "```" in content:
                     content = content.split("```")[1].split("```")[0].strip()
-                analysis = json.loads(content)
-                logger.info("✅ AI evaluation analysis completed (Gemini)")
-                return analysis
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse Gemini response as JSON: {e}")
-                logger.debug(f"Response content: {content[:500]}")
+                
+                # Try to parse JSON
+                try:
+                    analysis = json.loads(content)
+                    logger.info("✅ [GEMINI-DEBUG] Successfully parsed JSON, analysis completed")
+                    return analysis
+                except json.JSONDecodeError as json_err:
+                    # Log the error position and surrounding content
+                    error_pos = getattr(json_err, 'pos', None)
+                    if error_pos:
+                        start = max(0, error_pos - 200)
+                        end = min(len(content), error_pos + 200)
+                        logger.warning(f"❌ [GEMINI-DEBUG] JSON error at position {error_pos}: {json_err}")
+                        logger.warning(f"❌ [GEMINI-DEBUG] Content around error: {content[start:end]}")
+                    else:
+                        logger.warning(f"❌ [GEMINI-DEBUG] JSON error: {json_err}")
+                    
+                    # Try to fix common JSON issues
+                    logger.info("🔧 [GEMINI-DEBUG] Attempting to fix JSON...")
+                    fixed_content = self._fix_json_string(content)
+                    
+                    try:
+                        analysis = json.loads(fixed_content)
+                        logger.info("✅ [GEMINI-DEBUG] Successfully parsed JSON after fixing, analysis completed")
+                        return analysis
+                    except json.JSONDecodeError as e2:
+                        logger.warning(f"❌ [GEMINI-DEBUG] Still failed after fix attempt: {e2}")
+                        
+                        # Try one more approach: extract JSON using regex as last resort
+                        logger.info("🔧 [GEMINI-DEBUG] Trying regex-based JSON extraction as last resort...")
+                        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                        if json_match:
+                            try:
+                                extracted_json = json_match.group(0)
+                                analysis = json.loads(extracted_json)
+                                logger.info("✅ [GEMINI-DEBUG] Successfully parsed JSON using regex extraction")
+                                return analysis
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        logger.debug(f"Response content (first 1000 chars): {content[:1000]}")
+                        logger.debug(f"Response content (last 1000 chars): {content[-1000:]}")
+                        return None
+            except Exception as e:
+                logger.warning(f"❌ [GEMINI-DEBUG] Unexpected error parsing JSON: {e}", exc_info=True)
                 return None
         except Exception as e:
-            logger.warning(f"⚠️  AI evaluation analysis failed: {e}, using fallback")
+            logger.warning(f"❌ [GEMINI-DEBUG] AI evaluation analysis failed: {e}, using fallback", exc_info=True)
             return None
+    
+    def _fix_json_string(self, json_str: str) -> str:
+        """
+        Attempt to fix common JSON formatting issues in Gemini responses.
+        Handles unescaped quotes, newlines, and other common issues.
+        """
+        import re
+        
+        # Remove any leading/trailing whitespace
+        json_str = json_str.strip()
+        
+        # Try to find the JSON object boundaries
+        # Look for the first { and last }
+        first_brace = json_str.find('{')
+        last_brace = json_str.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_str = json_str[first_brace:last_brace + 1]
+        
+        # Try to fix unescaped quotes in string values
+        # We'll use a state machine approach to properly escape quotes inside string values
+        result = []
+        in_string = False
+        escape_next = False
+        i = 0
+        
+        while i < len(json_str):
+            char = json_str[i]
+            
+            if escape_next:
+                result.append(char)
+                escape_next = False
+                i += 1
+                continue
+            
+            if char == '\\':
+                result.append(char)
+                escape_next = True
+                i += 1
+                continue
+            
+            if char == '"':
+                # Check if this is the start/end of a string value
+                # Look backwards to see if we're in a key or value context
+                if not in_string:
+                    # Starting a string
+                    in_string = True
+                    result.append(char)
+                else:
+                    # Check if this quote is followed by : or , or } or ]
+                    # If so, it's likely the end of a string value
+                    peek_ahead = i + 1
+                    while peek_ahead < len(json_str) and json_str[peek_ahead] in ' \t\n\r':
+                        peek_ahead += 1
+                    
+                    if peek_ahead < len(json_str):
+                        next_char = json_str[peek_ahead]
+                        if next_char in [':', ',', '}', ']']:
+                            # This is the end of a string
+                            in_string = False
+                            result.append(char)
+                        else:
+                            # This is a quote inside a string value - escape it
+                            result.append('\\"')
+                    else:
+                        # End of string, this is the closing quote
+                        in_string = False
+                        result.append(char)
+                i += 1
+                continue
+            
+            # Handle newlines in string values
+            if in_string and char == '\n':
+                result.append('\\n')
+                i += 1
+                continue
+            
+            if in_string and char == '\r':
+                # Skip \r (part of \r\n)
+                i += 1
+                continue
+            
+            result.append(char)
+            i += 1
+        
+        return ''.join(result)
     
     def _format_transcript_for_analysis(self, transcript: List[Dict[str, Any]]) -> str:
         """Format transcript into readable text for AI analysis."""
@@ -374,7 +541,15 @@ Evaluate correctness, quality, complexity (Big O), and problem-solving approach.
 ---
 
 ## OUTPUT FORMAT:
-Your final response MUST be a single JSON object with the following structure. The "overall_feedback" field MUST contain the full Markdown-formatted report following the structure outlined in the user's request.
+Your final response MUST be a single, valid JSON object. All string values MUST have quotes properly escaped. 
+The "overall_feedback" field contains markdown text - ensure all quotes, newlines, and special characters are properly escaped for JSON.
+
+CRITICAL JSON REQUIREMENTS:
+- All quotes inside string values MUST be escaped with backslashes (\\")
+- Newlines in strings MUST be escaped as \\n
+- Do not include any text outside the JSON object
+- The JSON must be valid and parseable by standard JSON parsers
+- If the "overall_feedback" contains markdown with quotes, escape them: \\"
 
 {{
     "overall_score": <number 1-10>,
@@ -388,7 +563,7 @@ Your final response MUST be a single JSON object with the following structure. T
     "hire_recommendation": "STRONG HIRE" | "HIRE" | "NEEDS FURTHER EVALUATION" | "DO NOT HIRE",
     "strengths": ["list", "of", "strengths"],
     "areas_for_improvement": ["list", "of", "areas"],
-    "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY...",
+    "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY... (ALL QUOTES ESCAPED)",
     "rounds_analysis": [
         {{
             "round_name": "...",
@@ -427,12 +602,17 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             # Prepare data for AI
             summary_data = []
             for ev in evaluations:
+                # Extract overall_feedback from interview_state["scores"] if available
+                interview_state = ev.get("interview_state") or {}
+                scores = interview_state.get("scores") or {}
+                overall_feedback = scores.get("overall_feedback") or ""
+                
                 summary_data.append({
                     "date": ev.get("created_at"),
                     "score": ev.get("overall_score"),
                     "strengths": ev.get("strengths", [])[:3],
                     "improvements": ev.get("areas_for_improvement", [])[:3],
-                    "feedback": ev.get("overall_feedback", "")[:200]
+                    "feedback": overall_feedback[:200] if overall_feedback else ""
                 })
 
             prompt = f"""
@@ -492,6 +672,13 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             Evaluation ID if successful
         """
         try:
+            # Debug logging
+            logger.info(f"📊 [EVAL] Starting evaluation for {booking_token}")
+            logger.info(f"📊 [EVAL] Transcript length: {len(transcript) if transcript else 0}")
+            logger.info(f"📊 [EVAL] Interview state present: {interview_state is not None}")
+            logger.info(f"📊 [EVAL] HTTPX available: {HTTPX_AVAILABLE}")
+            logger.info(f"📊 [EVAL] Gemini API key set: {bool(self.config.gemini_llm.api_key)}")
+            
             # Calculate basic metrics first
             user_messages = [m for m in transcript if m.get('role') == 'user']
             assistant_messages = [m for m in transcript if m.get('role') == 'assistant']
@@ -533,6 +720,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 })
                 
             logger.info(f"💾 Saving PRELIMINARY evaluation with token_usage={token_usage}")
+            logger.info(f"📊 [EVAL-DEBUG] transcript_len={len(transcript) if transcript else 0}, min_for_ai={self.config.MIN_MESSAGES_FOR_AI_EVALUATION}")
             evaluation_id = self.create_evaluation(
                 booking_token=booking_token,
                 room_name=room_name,
@@ -553,38 +741,53 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
 
             # Try AI-powered analysis (skip Gemini for short interviews to save cost)
             ai_analysis = None
-            min_for_ai = getattr(self.config, "MIN_MESSAGES_FOR_AI_EVALUATION", 8)
+            min_for_ai = self.config.MIN_MESSAGES_FOR_AI_EVALUATION
+            logger.info(f"📊 [EVAL-DEBUG] Checking threshold: {len(transcript) if transcript else 0} >= {min_for_ai} = {bool(transcript and len(transcript) >= min_for_ai)}")
             if transcript and len(transcript) >= min_for_ai:
+                logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
                 try:
                     # Run async analysis
                     try:
+                        logger.info("🔄 [EVAL-DEBUG] Getting event loop...")
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
+                            logger.info("🔄 [EVAL-DEBUG] Loop is running, using ThreadPoolExecutor...")
                             import concurrent.futures
                             
                             def run_async():
+                                logger.info("🔄 [EVAL-DEBUG] Creating new event loop in thread...")
                                 new_loop = asyncio.new_event_loop()
                                 asyncio.set_event_loop(new_loop)
                                 try:
-                                    return new_loop.run_until_complete(
+                                    logger.info("🔄 [EVAL-DEBUG] Calling _analyze_with_gemini in new loop...")
+                                    result = new_loop.run_until_complete(
                                         self._analyze_with_gemini(transcript, interview_state)
                                     )
+                                    logger.info(f"✅ [EVAL-DEBUG] _analyze_with_gemini returned: {result is not None}")
+                                    return result
                                 finally:
                                     new_loop.close()
                             
                             with concurrent.futures.ThreadPoolExecutor() as executor:
+                                logger.info("⏳ [EVAL-DEBUG] Submitting async task to executor...")
                                 future = executor.submit(run_async)
+                                logger.info("⏳ [EVAL-DEBUG] Waiting for AI analysis result (timeout: 90s)...")
                                 ai_analysis = future.result(timeout=90)
+                                logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
                         else:
+                            logger.info("🔄 [EVAL-DEBUG] Loop not running, using run_until_complete...")
                             ai_analysis = loop.run_until_complete(
                                 self._analyze_with_gemini(transcript, interview_state)
                             )
-                    except RuntimeError:
+                            logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
+                    except RuntimeError as re:
+                        logger.info(f"🔄 [EVAL-DEBUG] RuntimeError: {re}, using asyncio.run...")
                         ai_analysis = asyncio.run(
                             self._analyze_with_gemini(transcript, interview_state)
                         )
+                        logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
                 except Exception as e:
-                    logger.warning(f"AI analysis failed: {e}, using fallback", exc_info=True)
+                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
             elif transcript and len(transcript) < min_for_ai:
                 logger.info(
                     f"⏭️  Skipping Gemini evaluation (interview has {len(transcript)} messages, "
@@ -720,11 +923,15 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             all_improvements = []
 
             for eval_data in evaluations:
-                # Stats
+                # Extract scores from interview_state["scores"] if available
+                interview_state = eval_data.get("interview_state") or {}
+                scores = interview_state.get("scores") or {}
+                
+                # Stats - read from interview_state["scores"] or default to 0
                 score = float(eval_data.get("overall_score") or 0)
-                comm = float(eval_data.get("communication_quality") or 0)
-                tech = float(eval_data.get("technical_knowledge") or 0)
-                prob = float(eval_data.get("problem_solving") or 0)
+                comm = float(scores.get("communication_quality") or 0)
+                tech = float(scores.get("technical_knowledge") or 0)
+                prob = float(scores.get("problem_solving") or 0)
                 
                 sum_overall += score
                 sum_comm += comm

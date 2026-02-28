@@ -157,7 +157,7 @@ class Config:
     USE_GEMINI_FOR_HISTORY_SUMMARY: bool = os.getenv("USE_GEMINI_FOR_HISTORY_SUMMARY", "false").lower() == "true"
     
     # Evaluation: skip Gemini AI analysis for very short interviews (saves cost)
-    MIN_MESSAGES_FOR_AI_EVALUATION: int = int(os.getenv("MIN_MESSAGES_FOR_AI_EVALUATION", "8"))
+    MIN_MESSAGES_FOR_AI_EVALUATION: int = int(os.getenv("MIN_MESSAGES_FOR_AI_EVALUATION", "3"))
     
     # Turn Detection
     # Enable ML-based multilingual turn detection (requires model download from HuggingFace).
