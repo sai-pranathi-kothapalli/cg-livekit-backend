@@ -87,10 +87,6 @@ async def get_evaluation(token: str):
         candidate_data = {
             "name": booking.get("name", ""),
             "email": booking.get("email", ""),
-            "application_form": {
-                "text": booking.get("application_text"),
-                "url": booking.get("application_url"),
-            } if booking.get("application_text") else None,
         }
 
         # Build interview metrics
@@ -102,22 +98,6 @@ async def get_evaluation(token: str):
                 "total_questions": evaluation.get("total_questions", 0),
                 "average_response_time": None,  # Can be calculated from transcript timestamps
             }
-
-        # Format rounds
-        rounds: List[RoundEvaluationResponse] = []
-        if evaluation and evaluation.get("rounds_data"):
-            for round_data in evaluation["rounds_data"]:
-                rounds.append(RoundEvaluationResponse(
-                    round_number=round_data.get("round_number", 0),
-                    round_name=round_data.get("round_name", ""),
-                    questions_asked=round_data.get("questions_count", 0),
-                    average_rating=round_data.get("average_rating"),
-                    time_spent_minutes=round_data.get("time_spent_minutes"),
-                    time_target_minutes=round_data.get("time_target_minutes"),
-                    topics_covered=round_data.get("topics_covered", []),
-                    performance_summary=round_data.get("performance_summary"),
-                    response_ratings=round_data.get("response_ratings", []),
-                ))
 
         # Extract scores from interview_state["scores"] if available
         interview_state = (evaluation.get("interview_state") or {}) if evaluation else {}
@@ -132,7 +112,7 @@ async def get_evaluation(token: str):
             booking=booking,
             candidate=candidate_data,
             interview_metrics=interview_metrics,
-            rounds=rounds,
+            rounds=[],  # Empty list - rounds data no longer provided
             overall_score=evaluation.get("overall_score") if evaluation else None,
             strengths=evaluation.get("strengths", []) if evaluation else [],
             areas_for_improvement=evaluation.get("areas_for_improvement", []) if evaluation else [],

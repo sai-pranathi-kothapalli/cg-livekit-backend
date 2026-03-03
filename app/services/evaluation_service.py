@@ -336,8 +336,17 @@ class EvaluationService:
                             except json.JSONDecodeError:
                                 pass
                         
+                        # Final fallback: extract scores from malformed JSON using regex patterns
+                        # This preserves the AI-generated scores even when JSON is completely broken
+                        logger.info("🔧 [GEMINI-DEBUG] All JSON parsing attempts failed. Attempting score extraction from raw content...")
+                        extracted_scores = self._extract_scores_from_malformed_json(content)
+                        if extracted_scores:
+                            logger.info("✅ [GEMINI-DEBUG] Successfully extracted scores from malformed JSON, using partial analysis")
+                            return extracted_scores
+                        
                         logger.debug(f"Response content (first 1000 chars): {content[:1000]}")
                         logger.debug(f"Response content (last 1000 chars): {content[-1000:]}")
+                        logger.warning("❌ [GEMINI-DEBUG] All parsing and extraction attempts failed, returning None")
                         return None
             except Exception as e:
                 logger.warning(f"❌ [GEMINI-DEBUG] Unexpected error parsing JSON: {e}", exc_info=True)
@@ -431,6 +440,109 @@ class EvaluationService:
             i += 1
         
         return ''.join(result)
+    
+    def _extract_scores_from_malformed_json(self, content: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract scores and key fields from malformed JSON using regex patterns.
+        This is a last resort when JSON parsing completely fails.
+        
+        Returns:
+            Dictionary with extracted fields, or None if extraction fails
+        """
+        try:
+            logger.info("🔧 [GEMINI-DEBUG] Attempting to extract scores from malformed JSON using regex...")
+            extracted = {}
+            
+            # Extract numeric scores using regex patterns
+            # Pattern: "field_name": <number> or "field_name": <number>,
+            score_patterns = {
+                'overall_score': r'"overall_score"\s*:\s*(\d+(?:\.\d+)?)',
+                'communication_quality': r'"communication_quality"\s*:\s*(\d+(?:\.\d+)?)',
+                'technical_knowledge': r'"technical_knowledge"\s*:\s*(\d+(?:\.\d+)?)',
+                'problem_solving': r'"problem_solving"\s*:\s*(\d+(?:\.\d+)?)',
+                'integrity_score': r'"integrity_score"\s*:\s*(\d+(?:\.\d+)?)',
+                'behavioral_score': r'"behavioral_score"\s*:\s*(\d+(?:\.\d+)?)',
+                'coding_score': r'"coding_score"\s*:\s*(\d+(?:\.\d+)?)',
+            }
+            
+            for field, pattern in score_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    try:
+                        value = float(match.group(1))
+                        # Validate score is in reasonable range (1-10)
+                        if 1.0 <= value <= 10.0:
+                            extracted[field] = value
+                            logger.debug(f"✅ Extracted {field}: {value}")
+                    except (ValueError, IndexError):
+                        pass
+            
+            # Extract string fields (verdicts, recommendations)
+            string_patterns = {
+                'integrity_verdict': r'"integrity_verdict"\s*:\s*"([^"]+)"',
+                'hire_recommendation': r'"hire_recommendation"\s*:\s*"([^"]+)"',
+            }
+            
+            for field, pattern in string_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    try:
+                        extracted[field] = match.group(1)
+                        logger.debug(f"✅ Extracted {field}: {extracted[field]}")
+                    except (IndexError, AttributeError):
+                        pass
+            
+            # Extract arrays (strengths, areas_for_improvement)
+            # Pattern: "field_name": ["item1", "item2", ...]
+            array_patterns = {
+                'strengths': r'"strengths"\s*:\s*\[(.*?)\]',
+                'areas_for_improvement': r'"areas_for_improvement"\s*:\s*\[(.*?)\]',
+            }
+            
+            for field, pattern in array_patterns.items():
+                match = re.search(pattern, content, re.DOTALL)
+                if match:
+                    try:
+                        array_content = match.group(1)
+                        # Extract quoted strings from the array
+                        items = re.findall(r'"([^"]+)"', array_content)
+                        if items:
+                            extracted[field] = items
+                            logger.debug(f"✅ Extracted {field}: {len(items)} items")
+                    except (IndexError, AttributeError):
+                        pass
+            
+            # Extract overall_feedback (try to get as much as possible)
+            # Look for the field and extract until we hit the next field or end
+            feedback_match = re.search(r'"overall_feedback"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', content, re.DOTALL)
+            if not feedback_match:
+                # Try to extract even if unterminated - get everything until next field
+                feedback_match = re.search(r'"overall_feedback"\s*:\s*"(.*?)(?="\s*[,}])', content, re.DOTALL)
+            if feedback_match:
+                try:
+                    feedback = feedback_match.group(1)
+                    # Unescape common escape sequences
+                    feedback = feedback.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                    # Limit length to prevent extremely long feedback
+                    if len(feedback) > 10000:
+                        feedback = feedback[:10000] + "\n\n[Feedback truncated due to length]"
+                    extracted['overall_feedback'] = feedback
+                    logger.debug(f"✅ Extracted overall_feedback: {len(feedback)} chars")
+                except (IndexError, AttributeError):
+                    pass
+            
+            # Only return if we extracted at least the overall_score (most critical field)
+            if 'overall_score' in extracted:
+                logger.info(f"✅ [GEMINI-DEBUG] Successfully extracted scores from malformed JSON. Overall score: {extracted.get('overall_score')}")
+                # Fill in missing scores with None (will use fallback defaults in calling code)
+                return extracted
+            else:
+                logger.warning("❌ [GEMINI-DEBUG] Could not extract overall_score from malformed JSON")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"❌ [GEMINI-DEBUG] Error extracting scores from malformed JSON: {e}", exc_info=True)
+            return None
     
     def _format_transcript_for_analysis(self, transcript: List[Dict[str, Any]]) -> str:
         """Format transcript into readable text for AI analysis."""
@@ -696,29 +808,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 except Exception as e:
                     logger.debug(f"[EvaluationService] Could not compute duration from transcript timestamps: {e}")
             
-            # Extract rounds data from interview state if available
-            rounds_analysis = []
-            if interview_state and 'response_ratings' in interview_state:
-                for round_name, ratings in interview_state.get('response_ratings', {}).items():
-                    if ratings:
-                        avg_rating = sum(ratings) / len(ratings)
-                        rounds_analysis.append({
-                            "round_name": round_name,
-                            "average_rating": avg_rating,
-                            "questions_count": len(ratings),
-                        })
-            
             # 1. IMMEDIATE SAVE: Save basic evaluation with token usage to prevent data loss on timeout
-            basic_rounds_data = []
-            for ra in rounds_analysis:
-                basic_rounds_data.append({
-                    "round_name": ra.get("round_name", ""),
-                    "average_rating": ra.get("average_rating", 0),
-                    "questions_count": ra.get("questions_count", 0),
-                    "performance_summary": "Pending AI analysis...",
-                    "topics_covered": [],
-                })
-                
             logger.info(f"💾 Saving PRELIMINARY evaluation with token_usage={token_usage}")
             logger.info(f"📊 [EVAL-DEBUG] transcript_len={len(transcript) if transcript else 0}, min_for_ai={self.config.MIN_MESSAGES_FOR_AI_EVALUATION}")
             evaluation_id = self.create_evaluation(
@@ -728,7 +818,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 total_questions=total_questions,
                 rounds_completed=rounds_completed,
                 overall_score=None, # Pending
-                rounds_data=basic_rounds_data,
+                rounds_data=[],  # No longer storing rounds data
                 strengths=[],
                 areas_for_improvement=[],
                 interview_state=interview_state,
@@ -742,6 +832,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             # Try AI-powered analysis (skip Gemini for short interviews to save cost)
             ai_analysis = None
             min_for_ai = self.config.MIN_MESSAGES_FOR_AI_EVALUATION
+            transcript_too_short = False  # Track if fallback is due to short transcript
             logger.info(f"📊 [EVAL-DEBUG] Checking threshold: {len(transcript) if transcript else 0} >= {min_for_ai} = {bool(transcript and len(transcript) >= min_for_ai)}")
             if transcript and len(transcript) >= min_for_ai:
                 logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
@@ -789,6 +880,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 except Exception as e:
                     logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
             elif transcript and len(transcript) < min_for_ai:
+                transcript_too_short = True  # Mark as short transcript scenario
                 logger.info(
                     f"⏭️  Skipping Gemini evaluation (interview has {len(transcript)} messages, "
                     f"min for AI evaluation is {min_for_ai}) — using fallback only"
@@ -796,58 +888,89 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             
             # Extract data from AI analysis or use fallback
             if ai_analysis:
-                overall_score = ai_analysis.get('overall_score') or 7.0
+                # Handle scores - use extracted value if present, otherwise fallback to 7.0
+                # Note: We check for None explicitly to preserve 0.0 scores if they exist
+                overall_score = ai_analysis.get('overall_score')
+                if overall_score is None:
+                    overall_score = 7.0
+                
+                communication_quality = ai_analysis.get('communication_quality')
+                if communication_quality is None:
+                    communication_quality = 7.0
+                
+                technical_knowledge = ai_analysis.get('technical_knowledge')
+                if technical_knowledge is None:
+                    technical_knowledge = 7.0
+                
+                problem_solving = ai_analysis.get('problem_solving')
+                if problem_solving is None:
+                    problem_solving = 7.0
+                
                 strengths = ai_analysis.get('strengths') or []
                 areas_for_improvement = ai_analysis.get('areas_for_improvement') or []
-                rounds_analysis = ai_analysis.get('rounds_analysis') or []
-                communication_quality = ai_analysis.get('communication_quality') or 7.0
-                technical_knowledge = ai_analysis.get('technical_knowledge') or 7.0
-                problem_solving = ai_analysis.get('problem_solving') or 7.0
+                # rounds_analysis removed - no longer storing rounds data
                 overall_feedback = ai_analysis.get('overall_feedback') or "Interview completed successfully."
-                logger.info(f"✅ Using AI-generated evaluation (score: {overall_score})")
+                
+                # Log if this was a partial extraction (only some fields)
+                extracted_fields = [k for k in ['overall_score', 'communication_quality', 'technical_knowledge', 
+                                                'problem_solving', 'strengths', 'areas_for_improvement', 
+                                                'overall_feedback'] if k in ai_analysis]
+                if len(extracted_fields) < 7:
+                    logger.info(f"✅ Using AI-generated evaluation (partial extraction: {extracted_fields}, score: {overall_score})")
+                else:
+                    logger.info(f"✅ Using AI-generated evaluation (score: {overall_score})")
             else:
-                overall_score = 7.0
-                communication_quality = 7.0
-                technical_knowledge = 7.0
-                problem_solving = 7.0
-                overall_feedback = (
-                    "The interview has been completed and basic metrics have been captured. "
-                    "Detailed AI-powered analysis was skipped or unavailable for this session."
-                )
-                strengths = [
-                    "Completed all interview rounds",
-                    "Engaged in conversation throughout",
-                    "Provided responses to questions asked",
-                ]
-                areas_for_improvement = [
-                    "Consider providing more detailed examples in responses",
-                    "Practice articulating technical concepts more clearly",
-                ]
-                logger.info("Using fallback evaluation (AI analysis not available)")
+                # Determine fallback score and feedback based on reason
+                if transcript_too_short:
+                    # Short transcript scenario - NO SCORES, just feedback
+                    transcript_count = len(transcript) if transcript else 0
+                    overall_score = None  # No score assigned
+                    communication_quality = None
+                    technical_knowledge = None
+                    problem_solving = None
+                    overall_feedback = (
+                        f"⚠️ **Insufficient Conversation for Detailed Analysis**\n\n"
+                        f"The interview had only {transcript_count} message(s), which is below the minimum threshold "
+                        f"of {min_for_ai} messages required for AI-powered evaluation. "
+                        f"To receive a comprehensive performance analysis, please ensure the interview includes "
+                        f"sufficient conversation and interaction.\n\n"
+                        f"**What this means:**\n"
+                        f"- Basic interview metrics have been captured (duration, questions asked, rounds completed)\n"
+                        f"- Detailed AI analysis was not performed due to limited conversation data\n"
+                        f"- For a complete evaluation, please complete a full interview session with adequate interaction"
+                    )
+                    strengths = [
+                        "Interview session initiated",
+                        "Basic participation recorded",
+                    ]
+                    areas_for_improvement = [
+                        "Complete a full interview session with sufficient conversation to receive detailed feedback",
+                        "Engage in all interview rounds to allow comprehensive performance evaluation",
+                    ]
+                    logger.info(f"Using fallback evaluation - transcript too short ({transcript_count} < {min_for_ai} messages) - NO SCORES ASSIGNED")
+                else:
+                    # Other failure scenarios (API errors, etc.) - still provide scores
+                    overall_score = 5.0
+                    communication_quality = 5.0
+                    technical_knowledge = 5.0
+                    problem_solving = 5.0
+                    overall_feedback = (
+                        "The interview has been completed and basic metrics have been captured. "
+                        "Detailed AI-powered analysis was unavailable for this session due to technical limitations. "
+                        "Please contact support if you believe this is an error."
+                    )
+                    strengths = [
+                        "Completed all interview rounds",
+                        "Engaged in conversation throughout",
+                        "Provided responses to questions asked",
+                    ]
+                    areas_for_improvement = [
+                        "Consider providing more detailed examples in responses",
+                        "Practice articulating technical concepts more clearly",
+                    ]
+                    logger.info("Using fallback evaluation (AI analysis not available - technical issue)")
             
-            # Format rounds_data for storage (FINAL)
-            rounds_data = []
-            if ai_analysis:
-                for round_analysis in rounds_analysis:
-                    rounds_data.append({
-                        "round_name": round_analysis.get("round_name", ""),
-                        "average_rating": round_analysis.get("average_rating", 0),
-                        "questions_count": round_analysis.get("questions_count", 0),
-                        "performance_summary": round_analysis.get("performance_summary"),
-                        "topics_covered": round_analysis.get("topics_covered", []),
-                    })
-            else:
-                # Use basic metrics calculated earlier if AI skipped
-                for ra in basic_rounds_data:
-                    rounds_data.append({
-                        "round_name": ra.get("round_name", ""),
-                        "average_rating": ra.get("average_rating", 0),
-                        "questions_count": ra.get("questions_count", 0),
-                        "performance_summary": "Handled successfully.",
-                        "topics_covered": [],
-                    })
-            
-            # Create final evaluation
+            # Create final evaluation (rounds_data no longer stored)
             evaluation_id = self.create_evaluation(
                 booking_token=booking_token,
                 room_name=room_name,
@@ -855,7 +978,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 total_questions=total_questions,
                 rounds_completed=rounds_completed,
                 overall_score=overall_score,
-                rounds_data=rounds_data,
+                rounds_data=[],  # No longer storing rounds data
                 strengths=strengths,
                 areas_for_improvement=areas_for_improvement,
                 interview_state=interview_state,
