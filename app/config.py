@@ -63,6 +63,24 @@ class GeminiConfig:
 
 
 @dataclass
+class ElevenLabsConfig:
+    """ElevenLabs TTS fallback configuration"""
+    api_key: Optional[str] = None
+    voice_id: str = "LQMC3j3fn1LA9ZhI4o8g"  # Default voice
+    model: Optional[str] = None  # Optional - custom voice determines model
+    tts_enabled: bool = False
+
+
+@dataclass
+class TavusConfig:
+    """Tavus Avatar configuration"""
+    api_key: Optional[str] = None
+    persona_id: Optional[str] = None
+    replica_id: Optional[str] = None
+    avatar_enabled: bool = False
+
+
+@dataclass
 class SileroVADConfig:
     """Silero VAD configuration"""
     min_speech_duration: float = 0.2  # Reduced for better sensitivity
@@ -126,6 +144,12 @@ class Config:
     
     # AI Services - LLM primary (Google Gemini)
     gemini_llm: GeminiConfig
+    
+    # AI Services - TTS fallback (ElevenLabs)
+    elevenlabs: ElevenLabsConfig
+    
+    # AI Services - Avatar (Tavus)
+    tavus: TavusConfig
     
     # Supabase configuration
     supabase: SupabaseConfig
@@ -265,6 +289,18 @@ class Config:
             gemini_llm=GeminiConfig(
                 api_key=gemini_api_key,
                 model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            ),
+            elevenlabs=ElevenLabsConfig(
+                api_key=os.getenv("ELEVENLABS_TTS_API_KEY") or os.getenv("ELEVEN_API_KEY"),
+                voice_id=os.getenv("ELEVENLABS_VOICE_ID", "LQMC3j3fn1LA9ZhI4o8g"),
+                model=os.getenv("ELEVENLABS_MODEL"),  # Optional - None if not set
+                tts_enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
+            ),
+            tavus=TavusConfig(
+                api_key=os.getenv("TAVUS_API_KEY"),
+                persona_id=os.getenv("TAVUS_PERSONA_ID"),
+                replica_id=os.getenv("TAVUS_REPLICA_ID"),
+                avatar_enabled=os.getenv("TAVUS_AVATAR_ENABLED", "false").lower() == "true",
             ),
             supabase=SupabaseConfig(
                 url=os.getenv("SUPABASE_URL", ""),
