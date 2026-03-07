@@ -924,10 +924,11 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 if transcript_too_short:
                     # Short transcript scenario - NO SCORES, just feedback
                     transcript_count = len(transcript) if transcript else 0
-                    overall_score = None  # No score assigned
-                    communication_quality = None
-                    technical_knowledge = None
-                    problem_solving = None
+                    overall_score = 0.0  # Assign 0.0 instead of None to mark as finished
+                    communication_quality = 0.0
+                    technical_knowledge = 0.0
+                    problem_solving = 0.0
+
                     overall_feedback = (
                         f"⚠️ **Insufficient Conversation for Detailed Analysis**\n\n"
                         f"The interview had only {transcript_count} message(s), which is below the minimum threshold "

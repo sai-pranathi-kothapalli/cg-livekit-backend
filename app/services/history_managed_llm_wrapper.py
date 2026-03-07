@@ -234,7 +234,12 @@ def _chat_ctx_to_input_tokens_estimate(chat_ctx: Any) -> int:
     try:
         if chat_ctx is None:
             return 0
-        items = getattr(chat_ctx, "items", None)
+        items = getattr(chat_ctx, "messages", [])
+        if not isinstance(items, list) and hasattr(chat_ctx, "items") and not callable(chat_ctx.items):
+            items = chat_ctx.items
+        elif not isinstance(items, list):
+            items = []
+        
         if not items:
             return 0
         total_chars = 0

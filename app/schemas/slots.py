@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 class CreateSlotRequest(BaseModel):
     slot_datetime: str = Field(..., example="2026-02-15T10:00:00+05:30")  # ISO format datetime string
     max_capacity: int = Field(default=30, example=10)  # Default 30, but admin can change
-    duration_minutes: int = Field(default=45, example=60)  # Interview duration in minutes (default 45)
+    duration_minutes: int = Field(default=30, example=60)  # Interview duration in minutes (default 30)
     notes: Optional[str] = Field(None, example="Morning interview slot")
 
 
@@ -42,8 +42,8 @@ class CreateDaySlotsRequest(BaseModel):
     date: str = Field(..., example="2026-02-16")  # YYYY-MM-DD
     start_time: str = Field(..., example="09:00")  # HH:MM (24-hour)
     end_time: str = Field(..., example="17:00")  # HH:MM (24-hour)
-    interval_minutes: int = Field(default=45, example=60)
-    duration_minutes: int = Field(default=45, example=45)
+    interval_minutes: int = Field(default=30, example=60)
+    duration_minutes: int = Field(default=30, example=45)
     max_capacity: int = Field(default=30, example=5)
     notes: Optional[str] = Field(None, example="Back-to-back testing slots")
 

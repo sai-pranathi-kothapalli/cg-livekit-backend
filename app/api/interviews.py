@@ -59,10 +59,11 @@ async def get_evaluation(token: str):
         # Get evaluation (may be preliminary with no score yet)
         evaluation = evaluation_service.get_evaluation(token)
 
-        # If evaluation is missing OR still in preliminary "analysis in progress" state,
+        # If evaluation is missing OR specifically in "analysis in progress" state,
         # recalculate a full evaluation from the transcript.
-        if transcript and (not evaluation or evaluation.get("overall_score") is None):
-            logger.info(f"[API] Evaluation missing or incomplete for {token}, recalculating from transcript...")
+        if transcript and (not evaluation or evaluation.get("overall_feedback") == "AI analysis in progress..."):
+            logger.info(f"[API] Evaluation missing or pending for {token}, recalculating from transcript...")
+
             
             # Extract interview_state from existing evaluation if available
             existing_interview_state = None

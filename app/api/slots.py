@@ -67,8 +67,8 @@ async def create_slot(
                 detail="Duration cannot exceed 120 minutes (2 hours)"
             )
 
-        # Use provided duration (default 45 minutes if not specified)
-        duration_minutes = request.duration_minutes or 45
+        # Use provided duration (default 30 minutes if not specified)
+        duration_minutes = request.duration_minutes or 30
         end_time = start_time + timedelta(minutes=duration_minutes)
 
         # Avoid duplicate: a slot already exists at this datetime

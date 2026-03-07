@@ -72,11 +72,10 @@ class ElevenLabsConfig:
 
 
 @dataclass
-class TavusConfig:
-    """Tavus Avatar configuration"""
+class LiveAvatarConfig:
+    """LiveAvatar configuration"""
     api_key: Optional[str] = None
-    persona_id: Optional[str] = None
-    replica_id: Optional[str] = None
+    avatar_id: Optional[str] = None
     avatar_enabled: bool = False
 
 
@@ -148,8 +147,8 @@ class Config:
     # AI Services - TTS fallback (ElevenLabs)
     elevenlabs: ElevenLabsConfig
     
-    # AI Services - Avatar (Tavus)
-    tavus: TavusConfig
+    # AI Services - Avatar (LiveAvatar/HeyGen)
+    liveavatar: LiveAvatarConfig
     
     # Supabase configuration
     supabase: SupabaseConfig
@@ -296,11 +295,10 @@ class Config:
                 model=os.getenv("ELEVENLABS_MODEL"),  # Optional - None if not set
                 tts_enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
             ),
-            tavus=TavusConfig(
-                api_key=os.getenv("TAVUS_API_KEY"),
-                persona_id=os.getenv("TAVUS_PERSONA_ID"),
-                replica_id=os.getenv("TAVUS_REPLICA_ID"),
-                avatar_enabled=os.getenv("TAVUS_AVATAR_ENABLED", "false").lower() == "true",
+            liveavatar=LiveAvatarConfig(
+                api_key=os.getenv("LIVEAVATAR_API_KEY"),
+                avatar_id=os.getenv("LIVEAVATAR_AVATAR_ID"),
+                avatar_enabled=os.getenv("LIVEAVATAR_AVATAR_ENABLED", "false").lower() == "true",
             ),
             supabase=SupabaseConfig(
                 url=os.getenv("SUPABASE_URL", ""),

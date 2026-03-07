@@ -100,18 +100,12 @@ async def enroll_user(
                 logger.error(f"[API] Failed to auto-assign slots: {str(e)}")
         
         if not target_slot_ids:
-                logger.warning(f"[API] Enrollment failed: No available slots for auto-assignment for {request.email}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No available slots found for auto-assignment. Please provide slot_ids manually.",
-                )
+            logger.warning(f"[API] No available slots found for auto-assignment for {request.email}. Proceeding without slot assignment.")
+
         elif request.slot_ids: # Only enforce the 10-slot rule if they provided them manually
             if len(target_slot_ids) < 10:
-                logger.warning(f"[API] Enrollment failed: User {request.email} provided only {len(target_slot_ids)} slots, minimum 10 required.")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="At least 10 slots must be assigned to the user",
-                )
+                logger.warning(f"[API] User {request.email} provided only {len(target_slot_ids)} slots. Proceeding despite recommendation of 10.")
+
 
             two_days_from_now = get_now_ist() + timedelta(days=2)
             for slot_id in target_slot_ids:
@@ -253,6 +247,7 @@ async def bulk_enroll_users(
 
         for idx, row in df.iterrows():
             try:
+
                 name = str(row["name"]).strip()
                 email = str(row["email"]).strip()
                 phone = str(row.get("phone", "")).strip() if pd.notna(row.get("phone")) else None
