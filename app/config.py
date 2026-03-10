@@ -259,7 +259,7 @@ class Config:
         smtp_port = os.getenv("SMTP_PORT", "587")
         smtp_secure = os.getenv("SMTP_SECURE", "false").lower() == "true" or smtp_port == "465"
         
-        return cls(
+        config_instance = cls(
             livekit=LiveKitConfig(
                 api_key=livekit_api_key,
                 api_secret=livekit_api_secret,
@@ -326,6 +326,16 @@ class Config:
             ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",
             REQUIRE_LOGIN_FOR_INTERVIEW=os.getenv("REQUIRE_LOGIN_FOR_INTERVIEW", "true").lower() == "true",
         )
+
+        # Enforce mutual exclusivity for TTS
+        if config_instance.openai.tts_enabled and config_instance.elevenlabs.tts_enabled:
+            raise ValueError(
+                "CRITICAL CONFIGURATION ERROR: Both SELF_HOSTED_TTS_ENABLED and "
+                "ELEVENLABS_TTS_ENABLED are set to 'true'. These services are mutually "
+                "exclusive. Please disable one in your .env file."
+            )
+        
+        return config_instance
 
 
 
