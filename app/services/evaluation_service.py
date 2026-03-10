@@ -153,6 +153,132 @@ class EvaluationService:
             logger.error(f"❌ Error updating token usage: {e}", exc_info=True)
             return False
 
+    def _create_incremental_evaluation_prompt(self, question: str, answer: str) -> str:
+        """Create a prompt for evaluating a single question-answer pair."""
+        return f"""
+You are an expert technical interviewer evaluator.
+Evaluate the candidate's answer to the following technical question.
+
+Question: {question}
+Candidate's Answer: {answer}
+
+Provide your evaluation in JSON format with the following fields:
+- score: (0-10) A numerical score for the answer's technical correctness and completeness.
+- technical_depth: (Low, Medium, High) The level of technical understanding demonstrated.
+- feedback: (Short string) A single concise sentence highlighting what was good or what was missing.
+- communication: (0-10) A score for how clearly the candidate explained their thought process.
+
+Return ONLY the JSON.
+"""
+
+    async def evaluate_answer(
+        self,
+        booking_token: str,
+        question: str,
+        answer: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Incrementally evaluate a single question-answer pair.
+        Uses a very small prompt to save tokens (< 800 tokens).
+        """
+        if not HTTPX_AVAILABLE or not self.config.gemini_llm.api_key:
+            return None
+
+        prompt = f"""Evaluate this interview Q&A. Be objective.
+Question: {question}
+Answer: {answer}
+
+Provide JSON:
+{{
+  "score": <1-10>,
+  "technical_depth": <1-10>,
+  "communication": <1-10>,
+  "feedback": "<concise feedback, max 2 sentences>"
+}}"""
+        
+        # Log input estimate
+        input_tokens = len(prompt) // 3
+        logger.info(f"📊 [EVAL] Token Estimate: input={input_tokens}")
+
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": self.config.gemini_llm.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "response_mime_type": "application/json",
+                        },
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+            if "candidates" in data and data["candidates"]:
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                # Log output tokens
+                output_tokens = len(text) // 3
+                logger.info(f"📊 [EVAL] Token Usage: in={input_tokens}, out={output_tokens}, total={input_tokens+output_tokens}")
+                
+                result = json.loads(text)
+                # Ensure fields exist
+                result.setdefault("score", 7)
+                result.setdefault("technical_depth", 7)
+                result.setdefault("communication", 7)
+                result.setdefault("feedback", "Good response.")
+                
+                # Add context for storage
+                result["question"] = question
+                result["answer"] = answer
+                result["timestamp"] = datetime.utcnow().isoformat() + "Z"
+                
+                # Store it
+                await self.store_answer_evaluation(booking_token, result)
+                return result
+        except Exception as e:
+            logger.warning(f"❌ Incremental evaluation failed: {e}")
+            return None
+
+    async def store_answer_evaluation(self, booking_token: str, evaluation_data: Dict[str, Any]):
+        """
+        Append the evaluation to the rounds_data array in Supabase.
+        """
+        try:
+            # Safe append: Fetch current, then Update
+            res = self.client.table("evaluations").select("rounds_data").eq("booking_token", booking_token).execute()
+            
+            if res.data:
+                rounds_data = res.data[0].get("rounds_data") or []
+                rounds_data.append(evaluation_data)
+                
+                self.client.table("evaluations").update({
+                    "rounds_data": rounds_data,
+                    "updated_at": datetime.utcnow().isoformat() + "Z"
+                }).eq("booking_token", booking_token).execute()
+                logger.info(f"✅ Stored incremental evaluation for booking {booking_token}")
+            else:
+                # Create original record if it doesn't exist (safety)
+                import uuid
+                eval_id = str(uuid.uuid4())
+                self.client.table("evaluations").insert({
+                    "id": eval_id,
+                    "booking_token": booking_token,
+                    "room_name": "unknown",
+                    "rounds_data": [evaluation_data],
+                    "rounds_completed": 1,
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "updated_at": datetime.utcnow().isoformat() + "Z"
+                }).execute()
+                logger.info(f"✅ Created evaluation and stored first incremental result for booking {booking_token}")
+        except Exception as e:
+            logger.error(f"❌ Failed to store incremental evaluation: {e}")
+
     async def get_evaluation_by_token(self, token: str) -> Optional[Dict[str, Any]]:
         """
         Get evaluation data for a specific booking token.
@@ -797,6 +923,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             
             total_questions = len(assistant_messages) - 1  # Exclude greeting
             rounds_completed = 5  # Assume all rounds if interview completed
+            min_for_ai = self.config.MIN_MESSAGES_FOR_AI_EVALUATION
             
             # Calculate duration (if timestamps available)
             duration_minutes = None
@@ -808,17 +935,24 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 except Exception as e:
                     logger.debug(f"[EvaluationService] Could not compute duration from transcript timestamps: {e}")
             
-            # 1. IMMEDIATE SAVE: Save basic evaluation with token usage to prevent data loss on timeout
+            # 1. Check for existing incremental evaluations in rounds_data
+            response = self.client.table("evaluations").select("rounds_data, interview_state").eq("booking_token", booking_token).execute()
+            incremental_evals = []
+            if response.data:
+                incremental_evals = response.data[0].get("rounds_data") or []
+                if not interview_state:
+                    interview_state = response.data[0].get("interview_state") or {}
+
+            # 2. IMMEDIATE SAVE: Save basic evaluation with token usage to prevent data loss on timeout
             logger.info(f"💾 Saving PRELIMINARY evaluation with token_usage={token_usage}")
-            logger.info(f"📊 [EVAL-DEBUG] transcript_len={len(transcript) if transcript else 0}, min_for_ai={self.config.MIN_MESSAGES_FOR_AI_EVALUATION}")
             evaluation_id = self.create_evaluation(
                 booking_token=booking_token,
                 room_name=room_name,
                 duration_minutes=duration_minutes,
                 total_questions=total_questions,
-                rounds_completed=rounds_completed,
+                rounds_completed=len(incremental_evals) if incremental_evals else rounds_completed,
                 overall_score=None, # Pending
-                rounds_data=[],  # No longer storing rounds data
+                rounds_data=incremental_evals,
                 strengths=[],
                 areas_for_improvement=[],
                 interview_state=interview_state,
@@ -829,12 +963,39 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 token_usage=token_usage,
             )
 
-            # Try AI-powered analysis (skip Gemini for short interviews to save cost)
-            ai_analysis = None
-            min_for_ai = self.config.MIN_MESSAGES_FOR_AI_EVALUATION
-            transcript_too_short = False  # Track if fallback is due to short transcript
-            logger.info(f"📊 [EVAL-DEBUG] Checking threshold: {len(transcript) if transcript else 0} >= {min_for_ai} = {bool(transcript and len(transcript) >= min_for_ai)}")
-            if transcript and len(transcript) >= min_for_ai:
+            # 3. Aggregate if we have enough incremental evaluations
+            if incremental_evals and len(incremental_evals) >= 3:
+                logger.info(f"📈 [EVAL] Aggregating {len(incremental_evals)} incremental evaluations for {booking_token}")
+                
+                sum_score = sum(ev.get("score", 0) for ev in incremental_evals)
+                sum_comm = sum(ev.get("communication", 0) for ev in incremental_evals)
+                
+                avg_score = round(sum_score / len(incremental_evals), 1)
+                avg_comm = round(sum_comm / len(incremental_evals), 1)
+                
+                # Extract strengths and areas for improvement from feedback
+                # Simple heuristic: positive feedback for strengths, negative for improvement
+                # For now, we'll just collect all feedback and let a smaller summary prompt handle it if needed
+                # Or just use the incremental feedback directly as strengths/improvement lists
+                
+                all_feedback = [ev.get("feedback", "") for ev in incremental_evals]
+                
+                # We still might want a quick summary prompt to get the final strengths/areas
+                # But this prompt will be much smaller since it's just summarizing previous feedback
+                
+                ai_analysis = {
+                    "overall_score": avg_score,
+                    "communication_quality": avg_comm,
+                    "technical_knowledge": avg_score, # Fallback
+                    "problem_solving": avg_score,     # Fallback
+                    "overall_feedback": "\n".join([f"- {fb}" for fb in all_feedback]),
+                    "strengths": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) >= 7],
+                    "areas_for_improvement": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) < 7]
+                }
+                logger.info(f"✅ [EVAL] Successfully aggregated incremental results. Final Score: {avg_score}")
+                # Skip full Gemini analysis if we aggregated successfully
+            elif transcript and len(transcript) >= min_for_ai:
+                logger.info("🚀 [EVAL] Sufficient transcript but no incremental evals (or < 3). Starting FULL AI analysis...")
                 logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
                 try:
                     # Run async analysis
@@ -979,7 +1140,7 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
                 total_questions=total_questions,
                 rounds_completed=rounds_completed,
                 overall_score=overall_score,
-                rounds_data=[],  # No longer storing rounds data
+                rounds_data=incremental_evals,  # Preserve the incremental rounds data
                 strengths=strengths,
                 areas_for_improvement=areas_for_improvement,
                 interview_state=interview_state,

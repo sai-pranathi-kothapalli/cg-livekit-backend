@@ -647,8 +647,7 @@ class HistoryManagedContextWrapper:
     async def __anext__(self):
         """Iterate and accumulate assistant response with error recovery. Block wrap-up at decoder level."""
         max_retries = 3
-        retry_count = 0
-        
+
         # If we already detected wrap-up, consume and discard rest of stream, then forward sanitized transcript
         if self._consuming_rest_after_wrapup:
             try:
@@ -668,109 +667,42 @@ class HistoryManagedContextWrapper:
                             logger.error("Failed to send transcript after wrap-up block: %s", e)
                     self._forwarded = True
                 raise
-        
-        while retry_count < max_retries:
-            try:
-                chunk = await self._cm.__anext__()
-                
-                # Extract text from chunk
-                chunk_text = ""
-                if hasattr(chunk, 'content'):
-                    chunk_text = chunk.content
-                elif hasattr(chunk, 'text'):
-                    chunk_text = chunk.text
-                elif isinstance(chunk, str):
-                    chunk_text = chunk
-                elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
-                    chunk_text = chunk.delta.content
 
-                # --- [INTERNAL] block real-time filter ---
-                # Strip [INTERNAL ... END INTERNAL CONTEXT ...] blocks before TTS receives them.
-                # Uses per-stream state (_internal_block_active, _internal_block_carry) to
-                # correctly handle blocks that span multiple streaming chunks.
-                if chunk_text:
-                    combined = self._internal_block_carry + chunk_text
-                    self._internal_block_carry = ""
+        # Outer loop: keeps fetching stream chunks until we have real content to return.
+        # When the [INTERNAL] block filter is actively buffering, empty chunks are skipped
+        # here rather than being forwarded to TTS, which prevents TTS from receiving a
+        # premature "done" signal and cutting off the question mid-sentence.
+        while True:
+            retry_count = 0
+            chunk = None
 
-                    if self._internal_block_active:
-                        # Currently inside an [INTERNAL] block — scan for the closing END marker.
-                        end_idx = combined.find(_INTERNAL_END)
-                        if end_idx == -1:
-                            # End marker not yet arrived — buffer everything, yield nothing.
-                            self._internal_block_carry = combined
-                            chunk_text = ""
-                        else:
-                            close_bracket = combined.find("]", end_idx + len(_INTERNAL_END))
-                            if close_bracket == -1:
-                                # Partial closing bracket — buffer from the end marker and wait.
-                                self._internal_block_carry = combined[end_idx:]
-                                chunk_text = ""
-                            else:
-                                # Block fully closed — text after the closing ']' is real content.
-                                self._internal_block_active = False
-                                after = combined[close_bracket + 1:].lstrip("\n")
-                                # Run through _strip_internal_blocks in case there are nested blocks.
-                                chunk_text = _strip_internal_blocks(after)
-                    else:
-                        start_idx = combined.find(_INTERNAL_START)
-                        pl_idx = combined.find(_PHASE_LOCK_START)
-                        # Determine the effective start: whichever marker appears first.
-                        if start_idx != -1 and (pl_idx == -1 or start_idx <= pl_idx):
-                            # Primary [INTERNAL] marker found.
-                            before = combined[:start_idx]
-                            after_start = combined[start_idx:]
-                            end_idx = after_start.find(_INTERNAL_END)
-                            if end_idx == -1:
-                                # Block opens but has no closing marker yet — go active.
-                                self._internal_block_active = True
-                                self._internal_block_carry = after_start  # buffer the open block
-                                chunk_text = before  # yield only the text before the block
-                            else:
-                                # Both open and close present in this chunk — strip all blocks.
-                                chunk_text = _strip_internal_blocks(combined)
-                        elif pl_idx != -1:
-                            # "PHASE LOCK —" found — Gemini echoed the body without [INTERNAL] header.
-                            before = combined[:pl_idx]
-                            after_start = combined[pl_idx:]
-                            end_idx = after_start.find(_INTERNAL_END)
-                            if end_idx == -1:
-                                # No closing tag yet — go active, buffer from PHASE LOCK.
-                                self._internal_block_active = True
-                                self._internal_block_carry = after_start
-                                chunk_text = before
-                            else:
-                                # Both PHASE LOCK body and closing tag in this chunk — strip.
-                                chunk_text = _strip_internal_blocks(combined)
-                        else:
-                            # No [INTERNAL] block in this chunk — pass through (with any carry prepended).
-                            chunk_text = combined
+            # Inner loop: retry on transient network / API errors for a single chunk fetch.
+            while retry_count < max_retries:
+                try:
+                    chunk = await self._cm.__anext__()
+                    break  # successfully fetched a chunk — exit retry loop
 
-                    # Patch the chunk in-place so TTS / downstream only receives filtered text.
-                    if hasattr(chunk, 'content') and chunk.content is not None:
-                        chunk.content = chunk_text
-                    elif hasattr(chunk, 'text') and chunk.text is not None:
-                        chunk.text = chunk_text
-                    elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
-                        chunk.delta.content = chunk_text
-
-                # Accumulate text
-                if chunk_text:
-                    self._accumulated_text += chunk_text
-
-                    # Do NOT strip wrap-up mid-stream (fixes half-sentence "Thank you for your...").
-                    # Backend sends END_INTERVIEW for the only allowed goodbye; time context forbids early thank/goodbye.
-                    # Only filter full goodbye in transcript send below if needed; pass full chunk to TTS.
-
-                    # Send incremental transcript (skip if flag is set)
-                    if not self._skip_transcript:
-                        new_chars = len(self._accumulated_text) - self._last_sent_length
-                        should_send = (
-                            self._last_sent_length == 0 or
-                            (len(self._accumulated_text) <= 50 and new_chars >= 1) or
-                            new_chars >= 5
+                except StopAsyncIteration:
+                    # Stream ended. If we are still inside an [INTERNAL] block, discard the
+                    # buffered carry entirely — never pass unresolved internal content to TTS
+                    # or the transcript (prevents context leakage on abrupt stream end).
+                    if self._internal_block_carry or self._internal_block_active:
+                        logger.warning(
+                            "[history_wrapper] Stream ended inside an open [INTERNAL] block — "
+                            "discarding %d buffered chars to prevent context leakage.",
+                            len(self._internal_block_carry),
                         )
-                        
-                        if should_send:
+                        self._internal_block_carry = ""
+                        self._internal_block_active = False
+
+                    # Forward final transcript
+                    if self._accumulated_text and not self._forwarded and not self._skip_transcript:
+                        has_unsent_text = len(self._accumulated_text) > self._last_sent_length
+                        if has_unsent_text:
+                            logger.debug(
+                                f"[OK] Final assistant response: "
+                                f"{len(self._accumulated_text)} chars"
+                            )
                             try:
                                 to_send = _strip_system_context_from_transcript(self._accumulated_text)
                                 to_send = _sanitize_transcript_no_conclusion(to_send)
@@ -778,23 +710,145 @@ class HistoryManagedContextWrapper:
                                     await self._transcript_service.send_transcript(to_send)
                                     self._last_sent_text = to_send
                                 self._last_sent_length = len(self._accumulated_text)
+                                self._forwarded = True
                             except Exception as e:
-                                logger.warning(f"[WARN] Incremental transcript send failed: {e}")
-                
-                # Reset retry count on successful chunk
-                retry_count = 0
-                return chunk
-                
-            except StopAsyncIteration:
-                # Normal end of stream - forward final transcript (skip if flag is set)
-                # Only send if we haven't already forwarded and there's unsent text
-                if self._accumulated_text and not self._forwarded and not self._skip_transcript:
-                    has_unsent_text = len(self._accumulated_text) > self._last_sent_length
-                    if has_unsent_text:
-                        logger.debug(
-                            f"[OK] Final assistant response: "
-                            f"{len(self._accumulated_text)} chars"
+                                logger.error(f"Failed to send final transcript: {e}", exc_info=True)
+                        else:
+                            self._forwarded = True
+                    raise
+
+                except Exception as e:
+                    retry_count += 1
+                    error_type = type(e).__name__
+                    error_msg = str(e)
+
+                    # Check if it's a recoverable error
+                    is_recoverable = (
+                        "timeout" in error_msg.lower() or
+                        "connection" in error_msg.lower() or
+                        "503" in error_msg or
+                        "502" in error_msg or
+                        "429" in error_msg or  # Rate limit
+                        "context" in error_msg.lower() or
+                        "token" in error_msg.lower()
+                    )
+
+                    if retry_count < max_retries and is_recoverable:
+                        wait_time = retry_count * 2  # Exponential backoff: 2s, 4s, 6s
+                        logger.warning(
+                            f"[WARN]  LLM chunk error (retry {retry_count}/{max_retries}): {error_type}: {error_msg}. "
+                            f"Retrying in {wait_time}s..."
                         )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        # Non-recoverable or max retries reached
+                        logger.error(
+                            f"[ERR] LLM chunk error (non-recoverable or max retries): {error_type}: {error_msg}",
+                            exc_info=True
+                        )
+                        # End gracefully instead of crashing to keep session alive
+                        logger.warning("🔄 Ending LLM stream gracefully to keep session alive")
+                        raise StopAsyncIteration
+
+            # Extract text from chunk
+            chunk_text = ""
+            if hasattr(chunk, 'content'):
+                chunk_text = chunk.content
+            elif hasattr(chunk, 'text'):
+                chunk_text = chunk.text
+            elif isinstance(chunk, str):
+                chunk_text = chunk
+            elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
+                chunk_text = chunk.delta.content
+
+            # --- [INTERNAL] block real-time filter ---
+            # Strip [INTERNAL ... END INTERNAL CONTEXT ...] blocks before TTS receives them.
+            # Uses per-stream state (_internal_block_active, _internal_block_carry) to
+            # correctly handle blocks that span multiple streaming chunks.
+            if chunk_text:
+                combined = self._internal_block_carry + chunk_text
+                self._internal_block_carry = ""
+
+                if self._internal_block_active:
+                    # Currently inside an [INTERNAL] block — scan for the closing END marker.
+                    end_idx = combined.find(_INTERNAL_END)
+                    if end_idx == -1:
+                        # End marker not yet arrived — buffer everything, yield nothing.
+                        self._internal_block_carry = combined
+                        chunk_text = ""
+                    else:
+                        close_bracket = combined.find("]", end_idx + len(_INTERNAL_END))
+                        if close_bracket == -1:
+                            # Partial closing bracket — buffer from the end marker and wait.
+                            self._internal_block_carry = combined[end_idx:]
+                            chunk_text = ""
+                        else:
+                            # Block fully closed — text after the closing ']' is real content.
+                            self._internal_block_active = False
+                            after = combined[close_bracket + 1:].lstrip("\n")
+                            # Run through _strip_internal_blocks in case there are nested blocks.
+                            chunk_text = _strip_internal_blocks(after)
+                else:
+                    start_idx = combined.find(_INTERNAL_START)
+                    pl_idx = combined.find(_PHASE_LOCK_START)
+                    # Determine the effective start: whichever marker appears first.
+                    if start_idx != -1 and (pl_idx == -1 or start_idx <= pl_idx):
+                        # Primary [INTERNAL] marker found.
+                        before = combined[:start_idx]
+                        after_start = combined[start_idx:]
+                        end_idx = after_start.find(_INTERNAL_END)
+                        if end_idx == -1:
+                            # Block opens but has no closing marker yet — go active.
+                            self._internal_block_active = True
+                            self._internal_block_carry = after_start  # buffer the open block
+                            chunk_text = before  # yield only the text before the block
+                        else:
+                            # Both open and close present in this chunk — strip all blocks.
+                            chunk_text = _strip_internal_blocks(combined)
+                    elif pl_idx != -1:
+                        # "PHASE LOCK —" found — Gemini echoed the body without [INTERNAL] header.
+                        before = combined[:pl_idx]
+                        after_start = combined[pl_idx:]
+                        end_idx = after_start.find(_INTERNAL_END)
+                        if end_idx == -1:
+                            # No closing tag yet — go active, buffer from PHASE LOCK.
+                            self._internal_block_active = True
+                            self._internal_block_carry = after_start
+                            chunk_text = before
+                        else:
+                            # Both PHASE LOCK body and closing tag in this chunk — strip.
+                            chunk_text = _strip_internal_blocks(combined)
+                    else:
+                        # No [INTERNAL] block in this chunk — pass through (with any carry prepended).
+                        chunk_text = combined
+
+                # Patch the chunk in-place so TTS / downstream only receives filtered text.
+                if hasattr(chunk, 'content') and chunk.content is not None:
+                    chunk.content = chunk_text
+                elif hasattr(chunk, 'text') and chunk.text is not None:
+                    chunk.text = chunk_text
+                elif hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content'):
+                    chunk.delta.content = chunk_text
+
+            # Accumulate text and send incremental transcript when we have real content.
+            if chunk_text:
+                self._accumulated_text += chunk_text
+
+                # Do NOT strip wrap-up mid-stream (fixes half-sentence "Thank you for your...").
+                # Backend sends END_INTERVIEW for the only allowed goodbye; time context forbids early thank/goodbye.
+                # Only filter full goodbye in transcript send below if needed; pass full chunk to TTS.
+
+                # Send incremental transcript (skip if flag is set)
+                if not self._skip_transcript:
+                    new_chars = len(self._accumulated_text) - self._last_sent_length
+                    should_send = (
+                        self._last_sent_length == 0 or
+                        (len(self._accumulated_text) <= 50 and new_chars >= 1) or
+                        new_chars >= 5
+                    )
+
+                    if should_send:
                         try:
                             to_send = _strip_system_context_from_transcript(self._accumulated_text)
                             to_send = _sanitize_transcript_no_conclusion(to_send)
@@ -802,47 +856,21 @@ class HistoryManagedContextWrapper:
                                 await self._transcript_service.send_transcript(to_send)
                                 self._last_sent_text = to_send
                             self._last_sent_length = len(self._accumulated_text)
-                            self._forwarded = True  # Mark as forwarded to prevent duplicate
                         except Exception as e:
-                            logger.error(f"Failed to send final transcript: {e}", exc_info=True)
-                    else:
-                        # Already sent everything incrementally, just mark as forwarded
-                        self._forwarded = True
-                raise
-                
-            except Exception as e:
-                retry_count += 1
-                error_type = type(e).__name__
-                error_msg = str(e)
-                
-                # Check if it's a recoverable error
-                is_recoverable = (
-                    "timeout" in error_msg.lower() or
-                    "connection" in error_msg.lower() or
-                    "503" in error_msg or
-                    "502" in error_msg or
-                    "429" in error_msg or  # Rate limit
-                    "context" in error_msg.lower() or
-                    "token" in error_msg.lower()
-                )
-                
-                if retry_count < max_retries and is_recoverable:
-                    wait_time = retry_count * 2  # Exponential backoff: 2s, 4s, 6s
-                    logger.warning(
-                        f"[WARN]  LLM chunk error (retry {retry_count}/{max_retries}): {error_type}: {error_msg}. "
-                        f"Retrying in {wait_time}s..."
-                    )
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    # Non-recoverable or max retries reached
-                    logger.error(
-                        f"[ERR] LLM chunk error (non-recoverable or max retries): {error_type}: {error_msg}",
-                        exc_info=True
-                    )
-                    # End gracefully instead of crashing to keep session alive
-                    logger.warning("🔄 Ending LLM stream gracefully to keep session alive")
-                    raise StopAsyncIteration
+                            logger.warning(f"[WARN] Incremental transcript send failed: {e}")
+
+                return chunk  # Return to TTS only when we have real content.
+
+            # chunk_text is empty — decide whether to loop or return.
+            if self._internal_block_active or self._internal_block_carry:
+                # Still buffering an [INTERNAL] block. Do NOT return the empty chunk to TTS —
+                # that would cause TTS to treat the silence as end-of-utterance and cut off.
+                # Instead, fetch the next chunk (outer while True continues).
+                continue
+
+            # Genuine empty chunk from the LLM (not due to internal block buffering).
+            # Return it as-is so the caller's iteration behaves normally.
+            return chunk
     
     def __getattr__(self, name: str) -> Any:
         """Proxy any other attributes to the original context manager"""

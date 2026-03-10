@@ -1,5 +1,4 @@
 # Runtime files
-logs/
 agent.log
 agent.pid
 *.log
