@@ -706,9 +706,33 @@ Provide JSON:
         transcript_text: str,
         interview_state: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Create prompt for AI evaluation analysis based on expert evaluator requirements."""
-        
-        # 1. Format Violations Log
+        """
+        Build the Gemini evaluation prompt.
+
+        The prompt template is fetched from the `evaluation_prompts` Supabase
+        table (active row with name='default').  Dynamic interview data is
+        injected via simple string substitution using the four placeholders:
+          {transcript}, {violations_log}, {coding_data}, {rounds_info}
+
+        Raises RuntimeError if no prompt is configured in the DB.
+        """
+        from app.services.evaluation_prompt_service import EvaluationPromptService  # local import to avoid circular deps
+
+        # ── 1. Fetch template from DB ────────────────────────────────────────
+        prompt_svc = EvaluationPromptService(self.config)
+        template = prompt_svc.get_active_prompt()
+
+        if not template:
+            msg = (
+                "❌ [EvaluationService] No evaluation prompt found in the database. "
+                "Please add a row to the `evaluation_prompts` table (name='default', is_active=true)."
+            )
+            logger.critical(msg)
+            raise RuntimeError(msg)
+
+        # ── 2. Build dynamic sections ────────────────────────────────────────
+
+        # Violations log
         violations_log = "None"
         violations = (interview_state or {}).get("violations", [])
         if violations:
@@ -717,7 +741,7 @@ Provide JSON:
                 for v in violations
             ])
 
-        # 2. Format Coding Submissions
+        # Coding submissions
         coding_data = "None"
         code_submissions = (interview_state or {}).get("code_submissions", [])
         if code_submissions:
@@ -731,103 +755,31 @@ Provide JSON:
                 for cs in code_submissions
             ])
 
-        # 3. Extract Round Data for context
+        # Round performance summary
         rounds_info = ""
-        if interview_state and 'response_ratings' in interview_state:
+        if interview_state and "response_ratings" in interview_state:
             rounds_info = "\nRound Performance Data:\n"
-            for round_name, ratings in interview_state.get('response_ratings', {}).items():
+            for round_name, ratings in interview_state.get("response_ratings", {}).items():
                 if ratings:
                     avg = sum(ratings) / len(ratings)
                     rounds_info += f"- {round_name}: {len(ratings)} questions, avg rating: {avg:.1f}/10\n"
 
-        prompt = f"""You are an expert technical interview evaluator and behavioral analyst. 
-Analyze the following interview data and produce a detailed, honest, and structured candidate evaluation report.
+        # ── 3. Substitute placeholders ───────────────────────────────────────
+        try:
+            prompt = template.format(
+                transcript=transcript_text,
+                violations_log=violations_log,
+                coding_data=coding_data,
+                rounds_info=rounds_info,
+            )
+        except KeyError as e:
+            logger.error(
+                f"[EvaluationService] Prompt template has unknown placeholder: {e}. "
+                "Expected: {{transcript}}, {{violations_log}}, {{coding_data}}, {{rounds_info}}"
+            )
+            raise
 
----
-## INPUT DATA:
-1. Full interview transcript:
-{transcript_text}
-
-2. Proctoring violation log:
-{violations_log}
-
-3. Coding submissions:
-{coding_data}
-
-{rounds_info}
----
-
-## YOUR EVALUATION TASKS:
-
-### SECTION 1: INTEGRITY ANALYSIS
-Analyze for signs of dishonesty, external help, or coaching. Flag unusually long pauses, textbook-perfect answers inconsistent with tone, and overlap with proctoring alerts.
-
-### SECTION 2: TECHNICAL KNOWLEDGE EVALUATION
-Evaluate correctness, depth of understanding, knowledge of edge cases, and consistency for each topic.
-
-### SECTION 3: COMMUNICATION SKILLS
-Assess clarity, structure, confidence, brevity, and active listening.
-
-### SECTION 4: PROBLEM SOLVING BEHAVIOR
-Analyze clarified questions, thinking out loud, logical progression, and self-review.
-
-### SECTION 5: BEHAVIORAL & SOFT SKILLS
-Evaluate handling of pressure, attitude, and ownership of knowledge gaps.
-
-### SECTION 6: PROCTORING VIOLATION SUMMARY
-Classify violations (MINOR/MODERATE/SEVERE) and identify if they coincide with hard questions.
-
-### SECTION 7: CODING QUESTION EVALUATION
-Evaluate correctness, quality, complexity (Big O), and problem-solving approach. Perform deep integrity analysis on code (suspiciously perfect code vs. human-like minor errors).
-
----
-
-## OUTPUT FORMAT:
-Your final response MUST be a single, valid JSON object. All string values MUST have quotes properly escaped. 
-The "overall_feedback" field contains markdown text - ensure all quotes, newlines, and special characters are properly escaped for JSON.
-
-CRITICAL JSON REQUIREMENTS:
-- All quotes inside string values MUST be escaped with backslashes (\\")
-- Newlines in strings MUST be escaped as \\n
-- Do not include any text outside the JSON object
-- The JSON must be valid and parseable by standard JSON parsers
-- If the "overall_feedback" contains markdown with quotes, escape them: \\"
-
-{{
-    "overall_score": <number 1-10>,
-    "integrity_score": <number 1-10>,
-    "technical_knowledge": <number 1-10>,
-    "communication_quality": <number 1-10>,
-    "problem_solving": <number 1-10>,
-    "behavioral_score": <number 1-10>,
-    "coding_score": <number 1-10>,
-    "integrity_verdict": "CLEAN" | "SUSPICIOUS" | "HIGH RISK",
-    "hire_recommendation": "STRONG HIRE" | "HIRE" | "NEEDS FURTHER EVALUATION" | "DO NOT HIRE",
-    "strengths": ["list", "of", "strengths"],
-    "areas_for_improvement": ["list", "of", "areas"],
-    "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY... (ALL QUOTES ESCAPED)",
-    "rounds_analysis": [
-        {{
-            "round_name": "...",
-            "performance_summary": "...",
-            "topics_covered": [],
-            "average_rating": <number>
-        }}
-    ]
-}}
-
-The "overall_feedback" markdown MUST include:
-1. ### CANDIDATE SUMMARY
-2. ### SCORECARD (as a markdown table)
-3. ### HIRE RECOMMENDATION
-4. ### REASONING
-5. ### RED FLAGS (if any)
-6. ### STRENGTHS
-7. ### AREAS OF CONCERN
-8. ### CODING EVALUATION (per question data and scorecard)
-
-Be objective, evidence-based, and reference specific timestamps or quotes."""
-        
+        logger.info(f"[EvaluationService] ✅ Prompt assembled from DB template (length={len(prompt)})")
         return prompt
     
     async def _generate_overall_analysis_with_gemini(
@@ -920,6 +872,9 @@ Be objective, evidence-based, and reference specific timestamps or quotes."""
             logger.info(f"📊 [EVAL] Interview state present: {interview_state is not None}")
             logger.info(f"📊 [EVAL] HTTPX available: {HTTPX_AVAILABLE}")
             logger.info(f"📊 [EVAL] Gemini API key set: {bool(self.config.gemini_llm.api_key)}")
+            
+            ai_analysis = None
+            transcript_too_short = False
             
             # Calculate basic metrics first
             user_messages = [m for m in transcript if m.get('role') == 'user']
