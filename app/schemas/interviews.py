@@ -35,6 +35,7 @@ class EvaluationResponse(BaseModel):
     communication_quality: Optional[float] = None
     technical_knowledge: Optional[float] = None
     problem_solving: Optional[float] = None
+    coding_score: Optional[float] = None
     overall_feedback: Optional[str] = None
     token_usage: Optional[Dict[str, int]] = None
 

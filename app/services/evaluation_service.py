@@ -52,6 +52,7 @@ class EvaluationService:
         communication_quality: Optional[float] = None,
         technical_knowledge: Optional[float] = None,
         problem_solving: Optional[float] = None,
+        coding_score: Optional[float] = None,
         overall_feedback: Optional[str] = None,
         token_usage: Optional[Dict[str, int]] = None,
     ) -> Optional[str]:
@@ -68,7 +69,8 @@ class EvaluationService:
             
             # Store additional fields in interview_state["scores"] to preserve data
             if communication_quality is not None or technical_knowledge is not None or \
-               problem_solving is not None or overall_feedback is not None or token_usage is not None:
+               problem_solving is not None or coding_score is not None or \
+               overall_feedback is not None or token_usage is not None:
                 if "scores" not in interview_state:
                     interview_state["scores"] = {}
                 
@@ -78,6 +80,8 @@ class EvaluationService:
                     interview_state["scores"]["technical_knowledge"] = float(technical_knowledge)
                 if problem_solving is not None:
                     interview_state["scores"]["problem_solving"] = float(problem_solving)
+                if coding_score is not None:
+                    interview_state["scores"]["coding_score"] = float(coding_score)
                 if overall_feedback is not None:
                     interview_state["scores"]["overall_feedback"] = overall_feedback
                 if token_usage is not None:
@@ -94,6 +98,7 @@ class EvaluationService:
                 "communication_quality": float(communication_quality) if communication_quality is not None else None,
                 "technical_knowledge": float(technical_knowledge) if technical_knowledge is not None else None,
                 "problem_solving": float(problem_solving) if problem_solving is not None else None,
+                "coding_score": float(coding_score) if coding_score is not None else None,
                 "overall_feedback": overall_feedback,
                 "rounds_data": rounds_data or [],
                 "strengths": strengths or [],
@@ -918,6 +923,7 @@ Provide JSON:
                 communication_quality=None,
                 technical_knowledge=None,
                 problem_solving=None,
+                coding_score=None,
                 overall_feedback="AI analysis in progress...",
                 token_usage=token_usage,
             )
@@ -947,6 +953,7 @@ Provide JSON:
                     "communication_quality": avg_comm,
                     "technical_knowledge": avg_score, # Fallback
                     "problem_solving": avg_score,     # Fallback
+                    "coding_score": avg_score,        # Fallback
                     "overall_feedback": "\n".join([f"- {fb}" for fb in all_feedback]),
                     "strengths": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) >= 7],
                     "areas_for_improvement": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) < 7]
@@ -1026,6 +1033,10 @@ Provide JSON:
                 if problem_solving is None:
                     problem_solving = 7.0
                 
+                coding_score = ai_analysis.get('coding_score')
+                if coding_score is None:
+                    coding_score = 7.0
+                
                 strengths = ai_analysis.get('strengths') or []
                 areas_for_improvement = ai_analysis.get('areas_for_improvement') or []
                 # rounds_analysis removed - no longer storing rounds data
@@ -1033,8 +1044,8 @@ Provide JSON:
                 
                 # Log if this was a partial extraction (only some fields)
                 extracted_fields = [k for k in ['overall_score', 'communication_quality', 'technical_knowledge', 
-                                                'problem_solving', 'strengths', 'areas_for_improvement', 
-                                                'overall_feedback'] if k in ai_analysis]
+                                                'problem_solving', 'coding_score', 'strengths', 
+                                                'areas_for_improvement', 'overall_feedback'] if k in ai_analysis]
                 if len(extracted_fields) < 7:
                     logger.info(f"✅ Using AI-generated evaluation (partial extraction: {extracted_fields}, score: {overall_score})")
                 else:
@@ -1048,6 +1059,7 @@ Provide JSON:
                     communication_quality = 0.0
                     technical_knowledge = 0.0
                     problem_solving = 0.0
+                    coding_score = 0.0
 
                     overall_feedback = (
                         f"⚠️ **Insufficient Conversation for Detailed Analysis**\n\n"
@@ -1075,6 +1087,7 @@ Provide JSON:
                     communication_quality = 5.0
                     technical_knowledge = 5.0
                     problem_solving = 5.0
+                    coding_score = 5.0
                     overall_feedback = (
                         "The interview has been completed and basic metrics have been captured. "
                         "Detailed AI-powered analysis was unavailable for this session due to technical limitations. "
@@ -1106,6 +1119,7 @@ Provide JSON:
                 communication_quality=communication_quality,
                 technical_knowledge=technical_knowledge,
                 problem_solving=problem_solving,
+                coding_score=coding_score,
                 overall_feedback=overall_feedback,
                 token_usage=token_usage,
             )
@@ -1161,6 +1175,7 @@ Provide JSON:
             sum_comm = 0.0
             sum_tech = 0.0
             sum_prob = 0.0
+            sum_coding = 0.0
             
             history = []
             all_strengths = []
@@ -1176,11 +1191,13 @@ Provide JSON:
                 comm = float(scores.get("communication_quality") or 0)
                 tech = float(scores.get("technical_knowledge") or 0)
                 prob = float(scores.get("problem_solving") or 0)
+                coding = float(scores.get("coding_score") or 0)
                 
                 sum_overall += score
                 sum_comm += comm
                 sum_tech += tech
                 sum_prob += prob
+                sum_coding += coding
                 
                 # History point
                 history.append({
@@ -1188,7 +1205,8 @@ Provide JSON:
                     "score": score,
                     "communication": comm,
                     "technical": tech,
-                    "problem_solving": prob
+                    "problem_solving": prob,
+                    "coding": coding
                 })
                 
                 # Collect strengths/improvements (prioritize more recent ones)
@@ -1221,7 +1239,8 @@ Provide JSON:
                     "overall": round(sum_overall / total, 1),
                     "communication": round(sum_comm / total, 1),
                     "technical": round(sum_tech / total, 1),
-                    "problem_solving": round(sum_prob / total, 1)
+                    "problem_solving": round(sum_prob / total, 1),
+                    "coding": round(sum_coding / total, 1)
                 },
                 "history": history,
                 "recent_strengths": unique_strengths,

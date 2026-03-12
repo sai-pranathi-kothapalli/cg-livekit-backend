@@ -123,6 +123,7 @@ async def get_evaluation(token: str):
             communication_quality=scores.get("communication_quality"),
             technical_knowledge=scores.get("technical_knowledge"),
             problem_solving=scores.get("problem_solving"),
+            coding_score=scores.get("coding_score"),
             overall_feedback=scores.get("overall_feedback"),
             token_usage=scores.get("token_usage"),
         )
