@@ -9,6 +9,8 @@ from app.schemas.interviews import (
     RoundEvaluationResponse,
     ConnectionDetailsRequest,
     ConnectionDetailsResponse,
+    CodeAnalysisRequest,
+    CodeAnalysisResponse,
 )
 from app.services.container import (
     booking_service,
@@ -470,6 +472,29 @@ async def get_student_analytics(current_student: dict = Depends(get_current_stud
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch analytics: {str(e)}"
+        )
+
+
+@router.post("/analyze-code")
+async def analyze_code(request: CodeAnalysisRequest):
+    """
+    Securely analyze code using Gemini API from the backend.
+    """
+    try:
+        # Create instance of EvaluationService (already available via evaluation_service from container)
+        # Note: evaluation_service is imported from app.services.container at top of file
+        feedback = await evaluation_service.analyze_code(
+            question=request.question,
+            code=request.code,
+            language=request.language
+        )
+        return { "feedback": feedback }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[API] Code analysis failed: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=error_msg
         )
 
 
