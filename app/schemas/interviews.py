@@ -52,10 +52,22 @@ class ConnectionDetailsResponse(BaseModel):
     participantToken: str
 
 
+class CodeAnalysisRequest(BaseModel):
+    question: str
+    code: str
+    language: str
+
+
+class CodeAnalysisResponse(BaseModel):
+    feedback: str
+
+
 __all__ = [
     "RoundEvaluationResponse",
     "EvaluationResponse",
     "ConnectionDetailsRequest",
     "ConnectionDetailsResponse",
+    "CodeAnalysisRequest",
+    "CodeAnalysisResponse",
 ]
 
