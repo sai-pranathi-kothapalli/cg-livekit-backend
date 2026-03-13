@@ -254,6 +254,69 @@ Provide JSON:
             logger.warning(f"❌ Incremental evaluation failed: {e}")
             return None
 
+    async def analyze_code(
+        self,
+        question: str,
+        code: str,
+        language: str
+    ) -> str:
+        """
+        Evaluate code submission for correctness, complexity, and quality.
+        Securely handles the request on the backend to prevent API key leakage.
+        """
+        if not HTTPX_AVAILABLE or not self.config.gemini_llm.api_key:
+            raise ValueError("AI Analysis service is not configured (missing key or library)")
+
+        prompt = f"""
+You are a coding interview evaluator. Analyze this code submission.
+
+Problem: {question or "Analyze the provided code based on general programming principles."}
+
+Language: {language}
+
+Candidate's Code:
+{code}
+
+Provide concise feedback (3-4 sentences max):
+1. Correctness: Does it solve the problem?
+2. Quality: Any bugs or issues?
+3. Complexity: Time/space complexity
+4. Verdict: Pass/Needs Improvement/Fail
+
+Be encouraging but honest.
+        """.strip()
+
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": self.config.gemini_llm.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+            if "candidates" in data and data["candidates"]:
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                if not text:
+                    raise ValueError("Gemini returned an empty response")
+                return text.strip()
+            
+            raise ValueError("No candidates found in Gemini response from Google")
+
+        except Exception as e:
+            logger.error(f"❌ Gemini Code Analysis request failed: {e}")
+            raise ValueError(f"AI Code Analysis failed: {str(e)}")
+
     async def store_answer_evaluation(self, booking_token: str, evaluation_data: Dict[str, Any]):
         """
         Append the evaluation to the rounds_data array in Supabase.
