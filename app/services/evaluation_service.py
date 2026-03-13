@@ -712,10 +712,10 @@ Be encouraging but honest.
             
             # Extract overall_feedback (try to get as much as possible)
             # Look for the field and extract until we hit the next field or end
-            feedback_match = re.search(r'"overall_feedback"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', content, re.DOTALL)
+            feedback_match = re.search(r'"overall_feedback"\s*:\s*"((?:[^"\\]|\\.)*)"', content, re.DOTALL)
             if not feedback_match:
                 # Try to extract even if unterminated - get everything until next field
-                feedback_match = re.search(r'"overall_feedback"\s*:\s*"(.*?)(?="\s*[,}])', content, re.DOTALL)
+                feedback_match = re.search(r'"overall_feedback"\s*:\s*"((?:(?!").)*?)(?="\s*[,}])', content, re.DOTALL)
             if feedback_match:
                 try:
                     feedback = feedback_match.group(1)
