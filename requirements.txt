@@ -118,6 +118,7 @@ slowapi==0.1.9
 
 # Supabase
 supabase>=2.10.0
+sqlalchemy>=2.0
 
 # Resume processing
 pypdf2==3.0.1

@@ -258,7 +258,7 @@ Provide JSON:
         self,
         question: str,
         code: str,
-        language: str
+        language: str = "python"
     ) -> str:
         """
         Evaluate code submission for correctness, complexity, and quality.
