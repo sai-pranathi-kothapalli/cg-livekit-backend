@@ -59,8 +59,10 @@ def test_connection_details(mock_access_token, mock_livekit_api, client, mock_co
     config.livekit.api_secret = "secret"
     config.REQUIRE_LOGIN_FOR_INTERVIEW = False
     
-    # Set scheduled_at to a future time so validation passes
-    future_time = datetime.now() + timedelta(minutes=10)
+    from app.utils.datetime_utils import get_now_ist
+    
+    # Set scheduled_at to a future time so validation passes (using IST to match API)
+    future_time = get_now_ist() + timedelta(minutes=10)
     mock_container_services["booking"].get_booking.return_value = {
         "token": "tok1", 
         "scheduled_at": future_time.isoformat()
