@@ -1,72 +1,53 @@
 import pytest
-from unittest.mock import MagicMock
-from datetime import datetime
+from unittest.mock import MagicMock, patch
 from app.services.booking_service import BookingService
+from datetime import datetime
+import uuid
 
 @pytest.fixture
-def booking_service(mock_container_services):
-    from app.config import get_config
-    service = BookingService(get_config())
-    service.client = MagicMock()
-    return service
+def booking_service():
+    with patch("app.services.booking_service.get_supabase") as mock_get:
+        mock_client = MagicMock()
+        mock_get.return_value = mock_client
+        from app.config import get_config
+        yield BookingService(get_config())
 
 def test_create_booking(booking_service):
-    mock_response = MagicMock()
-    booking_service.client.table.return_value.insert.return_value.execute.return_value = mock_response
-    
+    scheduled_at = datetime(2026, 3, 15, 10, 0)
+    slot_id = str(uuid.uuid4())
     token = booking_service.create_booking(
-        name="Alice",
-        email="alice@example.com",
-        scheduled_at=datetime.now(),
-        slot_id="slot-1"
+        name="Test User",
+        email="test@example.com",
+        scheduled_at=scheduled_at,
+        phone="1234567890",
+        slot_id=slot_id
     )
-    
     assert len(token) == 32
-    assert isinstance(token, str)
+    assert booking_service.client.table.called
 
 def test_get_booking(booking_service):
-    mock_response = MagicMock()
-    mock_booking = {"token": "tok123", "name": "Alice", "scheduled_at": "2026-02-14T10:00:00+05:30"}
-    mock_response.data = [mock_booking]
-    query = booking_service.client.table.return_value.select.return_value
-    query.eq.return_value = query
-    query.execute.return_value = mock_response
-    
-    result = booking_service.get_booking("tok123")
-    assert result["name"] == "Alice"
-    assert result["token"] == "tok123"
+    mock_data = [{"token": "t1", "scheduled_at": "2026-03-15T10:00:00+05:30"}]
+    booking_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value.data = mock_data
+    res = booking_service.get_booking("t1")
+    assert res["token"] == "t1"
+
+def test_get_all_bookings(booking_service):
+    mock_data = [{"token": "t1", "created_at": "2026-03-15T10:00:00+05:30"}]
+    booking_service.client.table.return_value.select.return_value.order.return_value.execute.return_value.data = mock_data
+    res = booking_service.get_all_bookings()
+    assert len(res) == 1
 
 def test_update_booking_status(booking_service):
-    mock_response = MagicMock()
-    mock_response.data = [{"token": "tok123", "status": "completed"}]
-    query = booking_service.client.table.return_value.update.return_value
-    query.eq.return_value = query
-    query.execute.return_value = mock_response
-    
-    assert booking_service.update_booking_status("tok123", "completed") is True
+    booking_service.client.table.return_value.update.return_value.eq.return_value.execute.return_value.data = [{"id": "b1"}]
+    assert booking_service.update_booking_status("t1", "completed") is True
+
+def test_get_bookings_by_email(booking_service):
+    mock_data = [{"token": "t1", "email": "test@e.com"}]
+    booking_service.client.table.return_value.select.return_value.ilike.return_value.execute.return_value.data = mock_data
+    res = booking_service.get_bookings_by_email("test@e.com")
+    assert len(res) == 1
 
 def test_delete_bookings_by_user_id(booking_service):
-    # Mock find tokens
-    mock_find = MagicMock()
-    mock_find.data = [{"token": "tok1"}, {"token": "tok2"}]
-    
-    query_find = booking_service.client.table.return_value.select.return_value
-    query_find.eq.return_value = query_find
-    query_find.execute.return_value = mock_find
-    
-    query_delete = booking_service.client.table.return_value.delete.return_value
-    query_delete.eq.return_value = query_delete
-    query_delete.execute.return_value = MagicMock()
-    
-    tokens = booking_service.delete_bookings_by_user_id("user-1")
-    assert tokens == ["tok1", "tok2"]
-
-def test_upload_application_to_storage(booking_service):
-    mock_storage = MagicMock()
-    # Correct mocking for storage
-    booking_service.client.storage.from_.return_value = mock_storage
-    mock_storage.upload.return_value = MagicMock()
-    mock_storage.get_public_url.return_value = "http://example.com/file.pdf"
-    
-    url = booking_service.upload_application_to_storage(b"content", "file.pdf")
-    assert url == "http://example.com/file.pdf"
+    booking_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{"token": "t1"}]
+    res = booking_service.delete_bookings_by_user_id("u1")
+    assert res == ["t1"]

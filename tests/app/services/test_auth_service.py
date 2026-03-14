@@ -2,8 +2,8 @@ import pytest
 import jwt
 import os
 from unittest.mock import MagicMock, patch
-from app.services.auth_service import AuthService
-from app.utils.exceptions import AgentError
+from app.services.auth_service import AuthService, _is_supabase_connectivity_error
+from app.utils.exceptions import AgentError, SupabaseUnavailableError
 
 @pytest.fixture
 def auth_service(mock_container_services):
@@ -79,3 +79,72 @@ def test_reset_password(auth_service):
     query.execute.return_value = mock_response
     
     assert auth_service.reset_password("test@e.com", "newpass") is True
+
+def test_register_manager_success(auth_service):
+    # Mock no existing user
+    mock_check = MagicMock()
+    mock_check.data = []
+    auth_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value = mock_check
+
+    # Mock insert
+    mock_insert = MagicMock()
+    mock_insert.data = [{"id": "mgr-1", "name": "Mgr", "email": "mgr@e.com"}]
+    auth_service.client.table.return_value.insert.return_value.execute.return_value = mock_insert
+    
+    result = auth_service.register_manager("Mgr", "mgr@e.com")
+    assert result["email"] == "mgr@e.com"
+    # The actual field in AuthService is 'temp_password'
+    assert "temp_password" in result
+
+def test_authenticate_admin_failure(auth_service):
+    # Mock user not found
+    mock_response = MagicMock()
+    mock_response.data = []
+    auth_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value = mock_response
+    
+    result = auth_service.authenticate_admin("admin", "wrong")
+    assert result is None
+
+def test_change_user_password_student(auth_service):
+    # Mock student auth success
+    mock_student = {"id": "s1", "email": "s@e.com", "role": "student"}
+    with patch.object(auth_service, "authenticate_student", return_value=mock_student):
+        # Mock update
+        mock_update = MagicMock()
+        mock_update.data = [{"id": "s1"}]
+        auth_service.client.table.return_value.update.return_value.eq.return_value.execute.return_value = mock_update
+        
+        result = auth_service.change_user_password("s@e.com", "old", "new")
+        assert result is True
+
+def test_delete_user_by_email(auth_service):
+    mock_response = MagicMock()
+    auth_service.client.table.return_value.delete.return_value.eq.return_value.execute.return_value = mock_response
+    
+    auth_service.delete_user_by_email("test@e.com")
+    assert auth_service.client.table.return_value.delete.called
+
+def test_connectivity_error_detection():
+    # Test connectivity error detection
+    e = Exception("SSL handshake failed")
+    assert _is_supabase_connectivity_error(e) is True
+    
+    e2 = Exception("Regular error")
+    assert _is_supabase_connectivity_error(e2) is False
+
+def test_authenticate_unified_not_found(auth_service):
+    # Mock user not found
+    mock_response = MagicMock()
+    mock_response.data = []
+    auth_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value = mock_response
+    
+    result = auth_service.authenticate_unified("unknown@e.com", "pass")
+    assert result is None
+
+@pytest.mark.asyncio
+async def test_auth_service_connectivity_error_handling(auth_service):
+    # Mock supabase connectivity error
+    auth_service.client.table.side_effect = Exception("525 SSL handshake failed")
+    
+    with pytest.raises(SupabaseUnavailableError):
+        auth_service.authenticate_unified("test@e.com", "pass")

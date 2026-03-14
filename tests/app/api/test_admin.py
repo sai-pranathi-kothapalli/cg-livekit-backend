@@ -97,3 +97,64 @@ def test_bulk_register(client, mock_admin_auth, mock_container_services):
     assert response.status_code == 200
     assert response.json()["successful"] == 2
     assert response.json()["total"] == 2
+
+def test_get_gemini_usage_report(client, mock_admin_auth, mock_container_services):
+    mock_container_services["booking"].get_all_bookings.return_value = [
+        {"token": "t1", "name": "C1", "email": "c1@e.com", "token_usage": {"total": 100}}
+    ]
+    
+    response = client.get("/api/admin/gemini-usage")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert response.json()[0]["token_usage"] == {"total": 100}
+
+def test_bulk_schedule_interviews_json(client, mock_admin_auth, mock_container_services):
+    mock_container_services["booking"].create_booking.return_value = "token"
+    
+    payload = {
+        "candidates": [
+            {"name": "C1", "email": "c1@e.com", "datetime": "2026-12-31T10:00:00"},
+            {"name": "C2", "email": "c2@e.com", "datetime": "2026-12-31T11:00:00"}
+        ]
+    }
+    
+    response = client.post("/api/admin/schedule-interview/bulk-json", json=payload)
+    assert response.status_code == 200
+    assert response.json()["successful"] == 2
+
+def test_register_candidate_slot_full(client, mock_admin_auth, mock_container_services):
+    # This test previously confused /register-candidate with another endpoint.
+    # register-candidate uses CandidateRegistrationRequest (name, email, phone, datetime)
+    mock_container_services["slot"].get_slot.return_value = {
+        "id": "slot-full",
+        "status": "active",
+        "current_bookings": 10,
+        "max_capacity": 10,
+        "slot_datetime": "2026-12-31T10:00:00"
+    }
+    
+    response = client.post("/api/admin/register-candidate", json={
+        "name": "C",
+        "email": "c@e.com",
+        "phone": "1234567890",
+        "datetime": "2026-12-31T12:00:00"
+    })
+    # The registration logic calls booking_service.create_booking
+    # Let's mock create_booking to raise if slot is full (as per actual implementation)
+    mock_container_services["booking"].create_booking.side_effect = Exception("Slot is full")
+    
+    response = client.post("/api/admin/register-candidate", json={
+        "name": "C",
+        "email": "c@e.com",
+        "phone": "1234567890",
+        "datetime": "2026-12-31T12:00:00"
+    })
+    assert response.status_code == 400 or response.status_code == 500
+
+def test_bulk_register_invalid_excel(client, mock_admin_auth):
+    # Upload a text file instead of Excel
+    response = client.post("/api/admin/bulk-register", files={
+        "file": ("test.txt", BytesIO(b"not excel"), "text/plain")
+    })
+    # Implementation might return 400 if validation fails early
+    assert response.status_code in [400, 500]

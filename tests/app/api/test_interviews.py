@@ -92,3 +92,22 @@ def test_connection_details(mock_access_token, mock_livekit_api, client, mock_co
     assert response.status_code == 200
     assert response.json()["participantToken"] == "jwt-token"
     assert response.json()["roomName"] == "interview_tok1"
+
+def test_connection_details_too_early(client, mock_container_services):
+    from app.utils.datetime_utils import get_now_ist
+    # 2 hours in future
+    future_time = get_now_ist() + timedelta(hours=2)
+    mock_container_services["booking"].get_booking.return_value = {
+        "token": "tok-future", 
+        "scheduled_at": future_time.isoformat()
+    }
+    
+    response = client.post("/api/interviews/connection-details", json={"token": "tok-future"})
+    assert response.status_code == 400
+    assert "not started" in response.json()["detail"].lower()
+
+def test_get_evaluation_not_found(client, mock_container_services):
+    mock_container_services["booking"].get_booking.return_value = None
+    
+    response = client.get("/api/interviews/evaluation/missing")
+    assert response.status_code == 404
