@@ -103,6 +103,7 @@ _cors_origins = [
     "http://127.0.0.1:3001",
     "http://127.0.0.1:5173",
     "http://192.168.1.13:3000",  # LAN access (e.g. from same network)
+    "https://interviewfrontenddev.codegnan.ai",
 ]
 if config.server.frontend_url:
     _cors_origins.append(config.server.frontend_url.rstrip("/"))
