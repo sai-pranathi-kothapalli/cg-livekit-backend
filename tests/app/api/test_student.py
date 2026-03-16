@@ -1,4 +1,6 @@
 import pytest
+from datetime import timedelta
+from app.utils.datetime_utils import get_now_ist
 
 def test_get_my_assignments(client, mock_container_services, mock_student_auth):
     # Student.py expects 'interview_slots' key in assignment for SlotResponse
@@ -45,9 +47,10 @@ def test_select_slot_success(client, mock_container_services, mock_student_auth)
     assert response.json()["ok"] is True
 
 def test_get_my_interview(client, mock_container_services, mock_student_auth):
+    now = get_now_ist()
     mock_container_services["user"].get_user_by_email.return_value = {"id": "u1", "email": "student@example.com"}
     mock_container_services["booking"].get_bookings_by_email.return_value = [
-        {"token": "tok1", "status": "scheduled", "scheduled_at": "2026-03-15T10:00:00", "slot_id": "s1"}
+        {"token": "tok1", "status": "scheduled", "scheduled_at": (now + timedelta(hours=1)).isoformat(), "slot_id": "s1"}
     ]
     mock_container_services["booking"].get_bookings_by_user_id.return_value = []
     mock_container_services["slot"].get_slot.return_value = {
@@ -92,14 +95,15 @@ def test_select_slot_not_assigned(client, mock_container_services, mock_student_
 
 def test_get_my_interview_complex(client, mock_container_services, mock_student_auth):
     # Test completed and missed paths
+    now = get_now_ist()
     mock_container_services["user"].get_user_by_email.return_value = {"id": "u1", "email": "student@example.com"}
     mock_container_services["slot"].get_slot.return_value = {"id": "s1", "duration_minutes": 30}
     
     # One completed, one missed (scheduled in the past)
     # Use explicit IST offset to avoid any ambiguity
     mock_container_services["booking"].get_bookings_by_email.return_value = [
-        {"token": "tok-comp", "status": "completed", "scheduled_at": "2020-03-10T10:00:00+05:30", "slot_id": "s1"},
-        {"token": "tok-miss", "status": "scheduled", "scheduled_at": "2020-03-10T11:00:00+05:30", "slot_id": "s2"}
+        {"token": "tok-comp", "status": "completed", "scheduled_at": (now - timedelta(hours=2)).isoformat(), "slot_id": "s1"},
+        {"token": "tok-miss", "status": "scheduled", "scheduled_at": (now - timedelta(hours=1)).isoformat(), "slot_id": "s2"}
     ]
     mock_container_services["booking"].get_bookings_by_user_id.return_value = []
     
