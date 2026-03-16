@@ -77,6 +77,7 @@ class LiveAvatarConfig:
     api_key: Optional[str] = None
     avatar_id: Optional[str] = None
     avatar_enabled: bool = False
+    is_sandbox: bool = False
 
 
 @dataclass
@@ -299,6 +300,7 @@ class Config:
                 api_key=os.getenv("LIVEAVATAR_API_KEY"),
                 avatar_id=os.getenv("LIVEAVATAR_AVATAR_ID"),
                 avatar_enabled=os.getenv("LIVEAVATAR_AVATAR_ENABLED", "false").lower() == "true",
+                is_sandbox=os.getenv("LIVEAVATAR_IS_SANDBOX", "false").lower() == "true",
             ),
             supabase=SupabaseConfig(
                 url=os.getenv("SUPABASE_URL", ""),
