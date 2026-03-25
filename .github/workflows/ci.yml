@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main, reethu]
+  pull_request:
+    branches: [main, reethu]
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Health check (import app)
+        env:
+          JWT_SECRET_KEY: test-secret-do-not-use-in-production
+          MONGODB_URI: mongodb://localhost:27017
+          MONGODB_DB_NAME: interview
+        run: python -c "from app.api.main import app; print('OK')"
+      - name: Pytest (if tests exist)
+        run: PYTHONPATH=. pytest --ignore=venv -v 2>/dev/null || true

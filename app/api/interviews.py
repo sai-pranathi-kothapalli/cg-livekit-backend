@@ -293,12 +293,11 @@ async def connection_details(
 
                     interview_end_time = scheduled_at + timedelta(minutes=duration_minutes)
 
-                    # Check if current time is before scheduled time (with 15-minute grace period for early joining)
-                    grace_period = timedelta(minutes=15)
-                    if now < (scheduled_at - grace_period):
+                    # Check if current time is before scheduled time
+                    if now < scheduled_at:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Interview has not started yet. You can join up to 15 minutes early. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                            detail=f"Interview has not started yet. You can only join starting from the scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
                         )
 
                     # Check if current time is after interview end time

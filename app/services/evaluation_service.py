@@ -678,7 +678,6 @@ Be encouraging but honest.
             # Extract string fields (verdicts, recommendations)
             string_patterns = {
                 'integrity_verdict': r'"integrity_verdict"\s*:\s*"([^"]+)"',
-                'hire_recommendation': r'"hire_recommendation"\s*:\s*"([^"]+)"',
             }
             
             for field, pattern in string_patterns.items():
