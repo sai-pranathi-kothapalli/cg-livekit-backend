@@ -130,6 +130,39 @@ class EvaluationService:
             logger.error(f"❌ Error creating evaluation: {e}", exc_info=True)
             return None
     
+    async def update_interview_state(self, booking_token: str, interview_state_update: Dict[str, Any]) -> bool:
+        """
+        Update the interview_state column in the evaluations table in real-time.
+        Useful for persisting session data (violations, code submissions) during the interview.
+        """
+        try:
+            # 1. Get existing evaluation to preserve other fields
+            response = self.client.table("evaluations").select("interview_state").eq("booking_token", booking_token).execute()
+            
+            existing_state = {}
+            if response.data:
+                existing_state = response.data[0].get("interview_state") or {}
+            
+            # 2. Merge updates
+            # Deep merge simple dicts (scores, violations, code_submissions)
+            for key, value in interview_state_update.items():
+                if key == "scores" and isinstance(value, dict) and "scores" in existing_state:
+                    existing_state["scores"].update(value)
+                else:
+                    existing_state[key] = value
+
+            # 3. Update DB
+            self.client.table("evaluations").update({
+                "interview_state": existing_state,
+                "updated_at": get_now_ist().isoformat()
+            }).eq("booking_token", booking_token).execute()
+            
+            logger.debug(f"✅ Real-time interview_state update for {booking_token}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update interview_state for {booking_token}: {e}")
+            return False
+
     async def update_token_usage(self, booking_token: str, token_usage: Dict[str, int]) -> bool:
         """
         Update token usage for a booking by storing it in interview_state["scores"]["token_usage"].
