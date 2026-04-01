@@ -61,11 +61,11 @@ def test_connection_details(mock_access_token, mock_livekit_api, client, mock_co
     
     from app.utils.datetime_utils import get_now_ist
     
-    # Set scheduled_at to a future time so validation passes (using IST to match API)
-    future_time = get_now_ist() + timedelta(minutes=10)
+    # Set scheduled_at to a valid past time so validation passes (using IST to match API)
+    valid_time = get_now_ist() - timedelta(minutes=10)
     mock_container_services["booking"].get_booking.return_value = {
         "token": "tok1", 
-        "scheduled_at": future_time.isoformat()
+        "scheduled_at": valid_time.isoformat()
     }
     
     # Setup mock LiveKitAPI context manager
