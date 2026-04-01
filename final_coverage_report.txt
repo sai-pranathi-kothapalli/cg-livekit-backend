@@ -1,0 +1,486 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0
+rootdir: /Users/codegnan4/Desktop/CG/backend
+configfile: pytest.ini
+plugins: mock-3.15.1, asyncio-1.2.0, anyio-4.12.0, cov-7.0.0
+asyncio: mode=auto, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 71 items
+
+tests/app/services/test_evaluation_service.py ....F............F         [ 25%]
+tests/app/services/test_auth_service.py .............                    [ 43%]
+tests/app/services/test_resume_service.py F...                           [ 49%]
+tests/app/api/test_admin.py ...........                                  [ 64%]
+tests/app/api/test_student.py .....F.                                    [ 74%]
+tests/app/api/test_users.py ..F..F......                                 [ 91%]
+tests/app/api/test_interviews.py ......                                  [100%]
+
+=================================== FAILURES ===================================
+_______________ test_extract_scores_from_malformed_json_fallback _______________
+
+evaluation_service = <app.services.evaluation_service.EvaluationService object at 0x12e88e490>
+
+    def test_extract_scores_from_malformed_json_fallback(evaluation_service):
+        # Test deep regex fallback for scores
+        content = "The rating is 8.5/10 and communication is excellent 9/10"
+        extracted = evaluation_service._extract_scores_from_malformed_json(content)
+>       assert extracted["overall_score"] == 8.5
+E       TypeError: 'NoneType' object is not subscriptable
+
+tests/app/services/test_evaluation_service.py:70: TypeError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.evaluation_service:evaluation_service.py:738 ❌ [GEMINI-DEBUG] Could not extract overall_score from malformed JSON
+____________________ test_calculate_evaluation_aggregation _____________________
+
+evaluation_service = <app.services.evaluation_service.EvaluationService object at 0x12945e220>
+
+    @pytest.mark.asyncio
+    async def test_calculate_evaluation_aggregation(evaluation_service):
+        # Test aggregation of incremental evals
+        booking_token = "tok-agg"
+        evaluation_service.client.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [
+            {"rounds_data": [{"score": 8, "communication": 7}, {"score": 9, "communication": 9}], "interview_state": {}}
+        ]
+    
+        with patch.object(evaluation_service, "create_evaluation", return_value="eval-agg") as mock_create:
+            evaluation_service.calculate_evaluation_from_transcript(booking_token, "room1", transcript=[])
+    
+            # Verify aggregation in final call
+            # (8+9)/2 = 8.5
+            final_call_args = mock_create.call_args_list[-1][1]
+>           assert final_call_args["overall_score"] == 8.5
+E           assert 5.0 == 8.5
+
+tests/app/services/test_evaluation_service.py:236: AssertionError
+_________________________ test_parse_application_data __________________________
+
+resume_service = <app.services.resume_service.ResumeService object at 0x1296621c0>
+
+    @pytest.mark.asyncio
+    async def test_parse_application_data(resume_service):
+        text = "Name: John Doe\nEmail: john@example.com\nPhone: 9876543210\nAadhaar: 1234 5678 9012"
+        result = await resume_service.parse_application_data(text)
+        # The parser returns a flat dict of extracted fields
+>       assert result["email"] == "john@example.com"
+E       KeyError: 'email'
+
+tests/app/services/test_resume_service.py:16: KeyError
+________________________ test_get_my_interview_complex _________________________
+
+client = <starlette.testclient.TestClient object at 0x12f60a220>
+mock_container_services = {'admin': <app.services.admin_service.AdminService object at 0x126ae7d60>, 'assignment': <app.services.assignment_serv...uthService object at 0x126ae7dc0>, 'booking': <app.services.booking_service.BookingService object at 0x126ae7c40>, ...}
+mock_student_auth = None
+
+    def test_get_my_interview_complex(client, mock_container_services, mock_student_auth):
+        # Test completed and missed paths
+        mock_container_services["user"].get_user_by_email.return_value = {"id": "u1", "email": "s@e.com"}
+    
+        # One completed, one missed (scheduled in the past)
+        mock_container_services["booking"].get_bookings_by_email.return_value = [
+            {"token": "tok-comp", "status": "completed", "scheduled_at": "2026-03-10T10:00:00", "slot_id": "s1"},
+            {"token": "tok-miss", "status": "scheduled", "scheduled_at": "2026-03-10T11:00:00", "slot_id": "s2"}
+        ]
+        mock_container_services["booking"].get_bookings_by_user_id.return_value = []
+    
+        # Mock completion evidence
+        mock_container_services["evaluation"].get_booking_tokens_with_evaluations.return_value = {"tok-comp"}
+>       mock_container_services["transcript_storage"].get_booking_tokens_with_transcripts.return_value = set()
+E       KeyError: 'transcript_storage'
+
+tests/app/api/test_student.py:106: KeyError
+________________________ test_enroll_user_invalid_slot _________________________
+
+client = <starlette.testclient.TestClient object at 0x12e9b66d0>
+mock_container_services = {'admin': <app.services.admin_service.AdminService object at 0x126ae7d60>, 'assignment': <app.services.assignment_serv...uthService object at 0x126ae7dc0>, 'booking': <app.services.booking_service.BookingService object at 0x126ae7c40>, ...}
+mock_admin_auth = None
+
+    def test_enroll_user_invalid_slot(client, mock_container_services, mock_admin_auth):
+        # Test slot not found/active
+        mock_container_services["user"].get_user_by_email.return_value = None
+        mock_container_services["slot"].get_slot.return_value = {"id": "s1", "status": "inactive", "slot_datetime": "2026-03-15T10:00:00"}
+    
+        response = client.post("/api/users/enroll", json={
+            "name": "Jane",
+            "email": "jane@e.com",
+            "slot_ids": ["s1"]
+        })
+>       assert response.status_code == 400
+E       assert 405 == 400
+E        +  where 405 = <Response [405 Method Not Allowed]>.status_code
+
+tests/app/api/test_users.py:53: AssertionError
+_____________________________ test_get_user_detail _____________________________
+
+client = <starlette.testclient.TestClient object at 0x12f3cd250>
+mock_container_services = {'admin': <app.services.admin_service.AdminService object at 0x126ae7d60>, 'assignment': <app.services.assignment_serv...uthService object at 0x126ae7dc0>, 'booking': <app.services.booking_service.BookingService object at 0x126ae7c40>, ...}
+mock_admin_auth = None
+
+    def test_get_user_detail(client, mock_container_services, mock_admin_auth):
+        mock_container_services["user"].get_user.return_value = {
+            "id": "u1",
+            "email": "u1@e.com",
+            "name": "U1",
+            "status": "enrolled",
+            "created_at": "2026-03-13T10:00:00Z"
+        }
+        mock_container_services["booking"].get_user_bookings.return_value = [{"id": "b1", "slot_id": "s1", "user_id": "u1"}]
+        mock_container_services["evaluation"].get_evaluations_for_bookings.return_value = []
+        # analytics mock
+        mock_container_services["evaluation"].get_student_analytics.return_value = {"overall_analysis": "good"}
+    
+        response = client.get("/api/users/u1")
+>       assert response.status_code == 200
+E       assert 500 == 200
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests/app/api/test_users.py:105: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    app.api.users:users.py:435 [API] Failed to fetch user: 'token'
+Traceback (most recent call last):
+  File "/Users/codegnan4/Desktop/CG/backend/app/api/users.py", line 392, in get_user
+    booking_tokens = [b["token"] for b in bookings]
+  File "/Users/codegnan4/Desktop/CG/backend/app/api/users.py", line 392, in <listcomp>
+    booking_tokens = [b["token"] for b in bookings]
+KeyError: 'token'
+=============================== warnings summary ===============================
+app/schemas/bookings.py:12
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:12: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: str = Field(..., example="Tester McGee")
+
+app/schemas/bookings.py:13
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:13: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="tester@example.com")
+
+app/schemas/bookings.py:14
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    phone: Optional[str] = Field(None, example="1234567890")
+
+app/schemas/bookings.py:15
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:15: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    datetime: str = Field(..., example="2026-02-14T17:00:00+05:30")  # ISO datetime string
+
+app/schemas/bookings.py:16
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:16: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    applicationUrl: Optional[str] = Field(None, example="http://example.com/resume.pdf")
+
+app/schemas/bookings.py:17
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/bookings.py:17: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    applicationText: Optional[str] = Field(None, example="Extracted resume text content...")
+
+app/schemas/admin.py:14
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    context: str = Field(..., example="We are looking for a Senior Software Engineer with 5+ years of experience in Python and FastAPI...")
+
+app/schemas/admin.py:22
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:22: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: str = Field(..., example="Alice Smith")
+
+app/schemas/admin.py:23
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:23: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="alice@example.com")
+
+app/schemas/admin.py:24
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:24: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    phone: str = Field(..., example="9876543210")
+
+app/schemas/admin.py:25
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:25: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    datetime: str = Field(..., example="2026-02-20T10:00:00+05:30")
+
+app/schemas/admin.py:37
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:37: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: str = Field(..., example="Bob Johnson")
+
+app/schemas/admin.py:38
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:38: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="bob@example.com")
+
+app/schemas/admin.py:52
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/admin.py:52: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    instructions: str = Field(..., example="Your task is to conduct a professional technical interview. Start by introducing yourself...")
+
+app/schemas/users.py:12
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:12: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: str = Field(..., min_length=2, description="Candidate's full name.", example="Jane Doe")
+
+app/schemas/users.py:13
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:13: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="jane@example.com")
+
+app/schemas/users.py:14
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    phone: Optional[str] = Field(None, example="1234567890")
+
+app/schemas/users.py:15
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:15: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    notes: Optional[str] = Field(None, example="Highly recommended candidate")
+
+app/schemas/users.py:16
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:16: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    slot_ids: List[str] = Field(default=[], description="List of slot IDs to assign (minimum 10 recommended).", example=["bc7d68f3-982b-4dbe-95bb-8d5621ac88cc"])
+
+app/schemas/users.py:20
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:20: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: Optional[str] = Field(None, example="Jane X. Doe")
+
+app/schemas/users.py:21
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:21: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: Optional[EmailStr] = Field(None, example="jane.new@example.com")
+
+app/schemas/users.py:22
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:22: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    phone: Optional[str] = Field(None, example="0987654321")
+
+app/schemas/users.py:23
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:23: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    status: Optional[str] = Field(None, example="inactive")
+
+app/schemas/users.py:24
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:24: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    notes: Optional[str] = Field(None, example="Updated notes")
+
+app/schemas/users.py:66
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:66: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    user_id: str = Field(..., example="f36caeef-761e-447d-9d59-db94597261a7")
+
+app/schemas/users.py:67
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:67: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    slot_id: str = Field(..., example="bc7d68f3-982b-4dbe-95bb-8d5621ac88cc")
+
+app/schemas/users.py:68
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:68: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    prompt: Optional[str] = Field(None, example="Discuss distributed systems architecture.")
+
+app/schemas/users.py:80
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:80: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="candidate1@example.com")
+
+app/schemas/users.py:81
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:81: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    datetime: str = Field(..., example="2026-02-14T18:00:00+05:30")  # ISO format string
+
+app/schemas/users.py:85
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:85: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    prompt: Optional[str] = Field(None, example="Focus on leadership skills and team management.")
+
+app/schemas/users.py:86
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/users.py:86: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    candidates: List[BulkScheduleItem] = Field(..., example=[{"email": "c1@example.com", "datetime": "2026-02-14T10:00:00+05:30"}])
+
+app/schemas/slots.py:13
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:13: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    slot_datetime: str = Field(..., example="2026-02-15T10:00:00+05:30")  # ISO format datetime string
+
+app/schemas/slots.py:14
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    max_capacity: int = Field(default=30, example=10)  # Default 30, but admin can change
+
+app/schemas/slots.py:15
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:15: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    duration_minutes: int = Field(default=30, example=60)  # Interview duration in minutes (default 30)
+
+app/schemas/slots.py:16
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:16: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    notes: Optional[str] = Field(None, example="Morning interview slot")
+
+app/schemas/slots.py:20
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:20: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    slot_datetime: Optional[str] = Field(None, example="2026-02-15T11:00:00+05:30")
+
+app/schemas/slots.py:21
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:21: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    max_capacity: Optional[int] = Field(None, example=20)
+
+app/schemas/slots.py:22
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:22: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    status: Optional[str] = Field(None, example="cancelled")
+
+app/schemas/slots.py:23
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:23: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    notes: Optional[str] = Field(None, example="Rescheduled due to availability")
+
+app/schemas/slots.py:42
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:42: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    date: str = Field(..., example="2026-02-16")  # YYYY-MM-DD
+
+app/schemas/slots.py:43
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:43: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    start_time: str = Field(..., example="09:00")  # HH:MM (24-hour)
+
+app/schemas/slots.py:44
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:44: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    end_time: str = Field(..., example="17:00")  # HH:MM (24-hour)
+
+app/schemas/slots.py:45
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:45: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    interval_minutes: int = Field(default=30, example=60)
+
+app/schemas/slots.py:46
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:46: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    duration_minutes: int = Field(default=30, example=45)
+
+app/schemas/slots.py:47
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:47: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    max_capacity: int = Field(default=30, example=5)
+
+app/schemas/slots.py:48
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/slots.py:48: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    notes: Optional[str] = Field(None, example="Back-to-back testing slots")
+
+app/schemas/interviews.py:44
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/interviews.py:44: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    room_config: Optional[dict] = Field(None, example={"audio": True, "video": False})
+
+app/schemas/interviews.py:45
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/interviews.py:45: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    token: Optional[str] = Field(None, example="XyeNodpGCy0H3HFEneHUTrw4kL35q39Z")
+
+../../../Library/Python/3.9/lib/python/site-packages/PyPDF2/__init__.py:21
+  /Users/codegnan4/Library/Python/3.9/lib/python/site-packages/PyPDF2/__init__.py:21: DeprecationWarning: PyPDF2 is deprecated. Please move to the pypdf library instead.
+    warnings.warn(
+
+app/schemas/auth.py:13
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:13: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    username: str = Field(..., example="test@example.com")
+
+app/schemas/auth.py:14
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    password: str = Field(..., example="password123")
+
+app/schemas/auth.py:26
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:26: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="test@example.com")
+
+app/schemas/auth.py:27
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:27: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    old_password: str = Field(..., example="oldpassword123")
+
+app/schemas/auth.py:28
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:28: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    new_password: str = Field(..., min_length=12, description="New password must be at least 12 characters.", example="newpassword123")
+
+app/schemas/auth.py:32
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:32: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: str = Field(..., example="test@example.com")
+
+app/schemas/auth.py:33
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:33: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    new_password: str = Field(..., example="resetpassword123")
+
+app/schemas/auth.py:37
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:37: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    email: EmailStr = Field(..., example="newstudent@example.com")
+
+app/schemas/auth.py:38
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:38: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    password: str = Field(..., example="password123456")
+
+app/schemas/auth.py:39
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:39: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    name: str = Field(..., example="John Doe")
+
+app/schemas/auth.py:40
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:40: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    phone: Optional[str] = Field(None, example="1234567890")
+
+app/schemas/auth.py:44
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:44: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    username: str = Field(..., example="admin")
+
+app/schemas/auth.py:45
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/auth.py:45: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    password: str = Field(..., example="adminpassword")
+
+app/schemas/student_status.py:24
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/student_status.py:24: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    slot_id: str = Field(..., example="bc7d68f3-982b-4dbe-95bb-8d5621ac88cc")
+
+app/schemas/student_status.py:25
+  /Users/codegnan4/Desktop/CG/backend/app/schemas/student_status.py:25: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'example'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    prompt: Optional[str] = Field(None, example="Focus more on Python concurrency during this round.")
+
+app/api/main.py:168
+  /Users/codegnan4/Desktop/CG/backend/app/api/main.py:168: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+../../../Library/Python/3.9/lib/python/site-packages/fastapi/applications.py:4495
+  /Users/codegnan4/Library/Python/3.9/lib/python/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+_______________ coverage: platform darwin, python 3.9.6-final-0 ________________
+
+Name                                           Stmts   Miss  Cover   Missing
+----------------------------------------------------------------------------
+app/api/__init__.py                                0      0   100%
+app/api/admin.py                                 355    177    50%   67-69, 90-92, 117-119, 146-148, 164-166, 178-183, 198-204, 226, 230-231, 276, 304, 316, 334-336, 342-345, 372-374, 386-389, 423-425, 453-516, 532-668, 686-727, 751-755, 777, 782, 788-789, 795, 797-798, 803, 840-842
+app/api/auth.py                                   92     72    22%   33-96, 107-119, 129-152, 163-224, 236-248
+app/api/bookings.py                               87     70    20%   36-123, 140-192
+app/api/compiler.py                               61     38    38%   42-138, 146-154
+app/api/interviews.py                            232     87    62%   67-87, 133-136, 157, 162, 167, 194-196, 213-214, 224-225, 232-245, 253-257, 265-290, 306, 314-315, 318-320, 336-337, 344, 377-378, 380, 392, 403-404, 407-409, 437-439, 462, 471-473, 493-496
+app/api/main.py                                  149     44    70%   88-90, 108, 112-115, 171-175, 181, 187-194, 200-205, 225, 234, 278, 286-298, 307-308
+app/api/resume.py                                 36     28    22%   23-90
+app/api/slots.py                                 144    120    17%   34-104, 119-134, 148-161, 176-210, 224-232, 243-249, 263-312
+app/api/student.py                               214     58    73%   50, 64, 77-81, 105-108, 158, 173-182, 235-238, 289-290, 292, 308-309, 330, 333-342, 356-366, 370-371, 394-398, 413-417, 435-438
+app/api/users.py                                 300    143    52%   83-97, 99-100, 105-138, 150-154, 167-170, 180-183, 203-204, 212, 230-244, 257, 269-273, 282-286, 289-293, 304-305, 312-316, 330-335, 353-356, 378-380, 387-390, 393-425, 468-471, 496-500, 504-506, 510-511, 518-519, 527-530, 547, 561-566
+app/config.py                                    147     15    90%   23-27, 220, 222, 224, 233, 235, 241, 243, 248, 254, 256, 332
+app/db/__init__.py                                 0      0   100%
+app/db/supabase.py                                11      1    91%   13
+app/main.py                                        6      6     0%   9-15
+app/schemas/__init__.py                            0      0   100%
+app/schemas/admin.py                              34      0   100%
+app/schemas/auth.py                               31      0   100%
+app/schemas/bookings.py                           36      0   100%
+app/schemas/interviews.py                         43      0   100%
+app/schemas/resume.py                              7      0   100%
+app/schemas/slots.py                              40      0   100%
+app/schemas/student_status.py                     19      0   100%
+app/schemas/users.py                              60      0   100%
+app/services/__init__.py                           0      0   100%
+app/services/admin_service.py                     52     33    37%   32-36, 39, 43-65, 69-89, 92
+app/services/application_form_service.py          67     67     0%   7-120
+app/services/assignment_service.py                58     41    29%   27-43, 46-54, 57-66, 69-77, 81-89
+app/services/auth_service.py                     254    120    53%   35, 37, 49, 60-62, 72, 80-84, 93-96, 107, 111, 128-162, 168-169, 174, 187-198, 220, 241-247, 255, 281-285, 295-298, 302-310, 313-320, 322-325, 327-349, 353-356, 359-362, 375-377, 381, 398-402, 405, 418-421, 425
+app/services/booking_service.py                  112     85    24%   45-68, 72-86, 90-97, 101-106, 110-115, 119-124, 128-133, 137-142, 146-151, 155-166, 170-186
+app/services/container.py                         24      0   100%
+app/services/conversation_history_manager.py     120    120     0%   11-256
+app/services/email_service.py                     66     50    24%   49-96, 117-160, 164-171, 247
+app/services/evaluation_prompt_service.py         46     46     0%   15-229
+app/services/evaluation_service.py               648    373    42%   26-28, 74-88, 115-118, 125, 129-131, 137-163, 167, 253-255, 268, 311, 314-318, 339-352, 361-363, 369-377, 386-391, 395-400, 405, 410, 412-414, 427-554, 585-588, 591-594, 621-622, 634-635, 675-676, 687-691, 703-711, 720-730, 741-743, 756-761, 768, 787-851, 860-919, 962-963, 1059-1071, 1073-1074, 1085, 1089, 1093, 1097, 1101, 1113, 1120-1146, 1191-1193, 1199-1337
+app/services/history/__init__.py                   0      0   100%
+app/services/history_managed_llm_wrapper.py      441    441     0%   7-877
+app/services/resume_service.py                   356    155    56%   15-16, 20-21, 93-105, 124-131, 135-168, 172-202, 209, 231, 247, 279, 286-333, 347, 375-377, 386-395, 409-410, 415-418, 434, 453, 478, 485, 493-494, 501, 508, 524, 531, 538, 545, 556, 564, 588, 595, 607, 613, 619, 625, 640, 647, 672-693
+app/services/slot_service.py                     173    149    14%   29-82, 92-122, 126-133, 136-143, 150-170, 173, 176-196, 199-204, 207-222, 236-263, 267-294
+app/services/system_instructions_service.py       36     21    42%   31-43, 47-71
+app/services/transcript_service.py               125    125     0%   8-284
+app/services/transcript_storage_service.py        87     70    20%   40-79, 91-137, 143-163, 167-172, 176-186
+app/services/user_service.py                      72     53    26%   33-49, 52-57, 60-65, 73-85, 89-94, 97-109, 112-117
+app/utils/__init__.py                              0      0   100%
+app/utils/api_key.py                              22     12    45%   21, 30, 47-74
+app/utils/auth_dependencies.py                    72     54    25%   35-77, 89-94, 106-112, 123-145, 159-175
+app/utils/datetime_utils.py                       69     39    43%   14-16, 39, 48-49, 51-52, 55-56, 60-85, 93-94, 101-110, 126
+app/utils/exceptions.py                           31      8    74%   33, 47-49, 63-65, 72
+app/utils/limiter.py                               3      0   100%
+app/utils/logger.py                               17     10    41%   23-42
+app/utils/url_helper.py                           27     11    59%   24-28, 33-37, 42
+app/utils/validators.py                           72     72     0%   8-251
+----------------------------------------------------------------------------
+TOTAL                                           5154   3014    42%
+=========================== short test summary info ============================
+FAILED tests/app/services/test_evaluation_service.py::test_extract_scores_from_malformed_json_fallback
+FAILED tests/app/services/test_evaluation_service.py::test_calculate_evaluation_aggregation
+FAILED tests/app/services/test_resume_service.py::test_parse_application_data
+FAILED tests/app/api/test_student.py::test_get_my_interview_complex - KeyErro...
+FAILED tests/app/api/test_users.py::test_enroll_user_invalid_slot - assert 40...
+FAILED tests/app/api/test_users.py::test_get_user_detail - assert 500 == 200
+================== 6 failed, 65 passed, 66 warnings in 3.43s ===================

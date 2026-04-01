@@ -11,6 +11,7 @@ from app.schemas.interviews import (
     ConnectionDetailsResponse,
     CodeAnalysisRequest,
     CodeAnalysisResponse,
+    SessionStateResponse,
 )
 from app.services.container import (
     booking_service,
@@ -137,6 +138,57 @@ async def get_evaluation(token: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
         )
+
+
+@router.get("/session-state/{token}", response_model=SessionStateResponse)
+async def get_session_state(token: str):
+    """
+    Get current session state for interview continuity (refresh handling).
+    """
+    try:
+        # 1. Get booking metadata
+        booking = booking_service.get_booking(token)
+        if not booking:
+            raise HTTPException(status_code=404, detail="Interview not found")
+
+        # 2. Get transcript
+        transcript = transcript_storage_service.get_transcript(token)
+
+        # 3. Get existing evaluation state (violations, code_submissions)
+        evaluation = evaluation_service.get_evaluation(token)
+        interview_state = evaluation.get("interview_state") if evaluation else None
+
+        # 4. Calculate remaining time
+        remaining_minutes = 30 # Default
+        scheduled_at_str = booking.get("scheduled_at") or booking.get("slot_datetime")
+        
+        if scheduled_at_str:
+            try:
+                scheduled_at = parse_datetime_safe(scheduled_at_str)
+                if scheduled_at:
+                    # Duration from booking or default 30
+                    duration = booking.get("duration_minutes") or 30
+                    end_time = scheduled_at + timedelta(minutes=int(duration))
+                    now = get_now_ist()
+                    
+                    if now < end_time:
+                        remaining_minutes = int((end_time - now).total_seconds() / 60)
+                    else:
+                        remaining_minutes = 0
+            except Exception as e:
+                logger.warning(f"Failed to calculate remaining time: {e}")
+
+        return SessionStateResponse(
+            transcript=transcript,
+            interview_state=interview_state,
+            remaining_minutes=remaining_minutes,
+            scheduled_at=scheduled_at_str
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session state for {token}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/connection-details", response_model=ConnectionDetailsResponse)
@@ -293,12 +345,11 @@ async def connection_details(
 
                     interview_end_time = scheduled_at + timedelta(minutes=duration_minutes)
 
-                    # Check if current time is before scheduled time (with 15-minute grace period for early joining)
-                    grace_period = timedelta(minutes=15)
-                    if now < (scheduled_at - grace_period):
+                    # Check if current time is before scheduled time
+                    if now < scheduled_at:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Interview has not started yet. You can join up to 15 minutes early. Scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                            detail=f"Interview has not started yet. You can only join starting from the scheduled time: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S IST')}"
                         )
 
                     # Check if current time is after interview end time

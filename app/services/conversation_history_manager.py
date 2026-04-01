@@ -242,6 +242,10 @@ class ConversationHistoryManager:
         )
         return result
 
+    def get_total_tokens(self) -> int:
+        """Get total tokens in conversation history"""
+        return self.total_tokens
+
     def clear(self) -> None:
         """Clear conversation history"""
         self.messages = []

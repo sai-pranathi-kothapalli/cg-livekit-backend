@@ -49,7 +49,10 @@ class CreateDaySlotsRequest(BaseModel):
 
 
 class CreateDaySlotsResponse(BaseModel):
+    success: bool
+    created_count: int
     slots: List[SlotResponse]
+    errors: Optional[List[str]] = None
 
 
 __all__ = [

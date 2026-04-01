@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 
 # Test the API endpoint
 try:
@@ -8,7 +9,7 @@ try:
         "http://localhost:8000/api/login",
         json={
             "username": "dewar@codegnan.com",
-            "password": "Dewar@123"
+            "password": os.getenv("TEST_MANAGER_PASSWORD", "Dewar@123")
         }
     )
     

@@ -62,6 +62,13 @@ class CodeAnalysisResponse(BaseModel):
     feedback: str
 
 
+class SessionStateResponse(BaseModel):
+    transcript: List[Dict[str, Any]]
+    interview_state: Optional[Dict[str, Any]] = None
+    remaining_minutes: Optional[int] = None
+    scheduled_at: Optional[str] = None
+
+
 __all__ = [
     "RoundEvaluationResponse",
     "EvaluationResponse",
@@ -69,5 +76,6 @@ __all__ = [
     "ConnectionDetailsResponse",
     "CodeAnalysisRequest",
     "CodeAnalysisResponse",
+    "SessionStateResponse",
 ]
 

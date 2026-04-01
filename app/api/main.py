@@ -94,30 +94,34 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 # CORS middleware: with allow_credentials=True, origins cannot be "*" (must be explicit).
-# Include localhost (dev), common LAN origin, and cloudflared tunnel URLs.
-_cors_origins = [
+# Origins are managed via the CORS_ORIGINS environment variable and the backend config.
+_cors_origins = [str(origin).rstrip("/") for origin in config.BACKEND_CORS_ORIGINS]
+
+# Add internal defaults if not already present
+defaults = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
     "http://127.0.0.1:5173",
-    "http://192.168.1.13:3000",  # LAN access (e.g. from same network)
+    "https://interviewfrontenddev.codegnan.ai",
 ]
+for d in defaults:
+    if d not in _cors_origins:
+        _cors_origins.append(d)
+
 if config.server.frontend_url:
-    _cors_origins.append(config.server.frontend_url.rstrip("/"))
-# Extra origins from env (comma-separated), e.g. CORS_ORIGINS=http://192.168.1.5:3000,http://10.0.0.1:3000
-_extra_origins = os.getenv("CORS_ORIGINS", "")
-if _extra_origins:
-    for o in _extra_origins.split(","):
-        o = o.strip().rstrip("/")
-        if o and o not in _cors_origins:
-            _cors_origins.append(o)
+    f_url = config.server.frontend_url.rstrip("/")
+    if f_url not in _cors_origins:
+        _cors_origins.append(f_url)
+
 # Allow cloudflare tunnels and any LAN IP (192.168.x.x, 10.x.x.x) with any port
 _origin_regex = (
     r"https?://[a-z0-9-]+\.trycloudflare\.com|"
     r"https?://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$"
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

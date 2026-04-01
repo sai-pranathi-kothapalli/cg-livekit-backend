@@ -69,6 +69,8 @@ class ElevenLabsConfig:
     voice_id: str = "LQMC3j3fn1LA9ZhI4o8g"  # Default voice
     model: Optional[str] = None  # Optional - custom voice determines model
     tts_enabled: bool = False
+    stt_enabled: bool = False
+    stt_model: str = "eleven_multilingual_v2"
 
 
 @dataclass
@@ -77,6 +79,7 @@ class LiveAvatarConfig:
     api_key: Optional[str] = None
     avatar_id: Optional[str] = None
     avatar_enabled: bool = False
+    is_sandbox: bool = False
 
 
 @dataclass
@@ -161,6 +164,9 @@ class Config:
     
     # API Key configuration
     api_key: APIKeyConfig
+    
+    # CORS configuration
+    BACKEND_CORS_ORIGINS: list[str] = None
     
     # Application processing
     MAX_APPLICATION_LENGTH: int = 3000  # Characters
@@ -294,11 +300,14 @@ class Config:
                 voice_id=os.getenv("ELEVENLABS_VOICE_ID", "LQMC3j3fn1LA9ZhI4o8g"),
                 model=os.getenv("ELEVENLABS_MODEL"),  # Optional - None if not set
                 tts_enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
+                stt_enabled=os.getenv("ELEVENLABS_STT_ENABLED", "false").lower() == "true",
+                stt_model=os.getenv("ELEVENLABS_STT_MODEL", "eleven_multilingual_v2"),
             ),
             liveavatar=LiveAvatarConfig(
                 api_key=os.getenv("LIVEAVATAR_API_KEY"),
                 avatar_id=os.getenv("LIVEAVATAR_AVATAR_ID"),
                 avatar_enabled=os.getenv("LIVEAVATAR_AVATAR_ENABLED", "false").lower() == "true",
+                is_sandbox=os.getenv("LIVEAVATAR_IS_SANDBOX", "false").lower() == "true",
             ),
             supabase=SupabaseConfig(
                 url=os.getenv("SUPABASE_URL", ""),
@@ -322,16 +331,26 @@ class Config:
             api_key=APIKeyConfig(
                 key_hash=os.getenv("API_KEY_HASH"),
             ),
+            BACKEND_CORS_ORIGINS=[
+                o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+            ],
             MAX_APPLICATION_LENGTH=int(os.getenv("MAX_APPLICATION_LENGTH", "3000")),
             ENABLE_ML_TURN_DETECTION=os.getenv("ENABLE_ML_TURN_DETECTION", "false").lower() == "true",
             REQUIRE_LOGIN_FOR_INTERVIEW=os.getenv("REQUIRE_LOGIN_FOR_INTERVIEW", "true").lower() == "true",
         )
 
-        # Enforce mutual exclusivity for TTS
+        # Enforce mutual exclusivity for TTS and STT
         if config_instance.openai.tts_enabled and config_instance.elevenlabs.tts_enabled:
             raise ValueError(
                 "CRITICAL CONFIGURATION ERROR: Both SELF_HOSTED_TTS_ENABLED and "
                 "ELEVENLABS_TTS_ENABLED are set to 'true'. These services are mutually "
+                "exclusive. Please disable one in your .env file."
+            )
+        
+        if config_instance.openai.stt_enabled and config_instance.elevenlabs.stt_enabled:
+            raise ValueError(
+                "CRITICAL CONFIGURATION ERROR: Both SELF_HOSTED_STT_ENABLED and "
+                "ELEVENLABS_STT_ENABLED are set to 'true'. These services are mutually "
                 "exclusive. Please disable one in your .env file."
             )
         

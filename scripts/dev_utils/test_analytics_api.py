@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 
 # Test the analytics endpoint
 try:
@@ -8,7 +9,7 @@ try:
         "http://localhost:8000/api/login",
         json={
             "username": "pranathi@codegnan.com",
-            "password": "Pranathi@0509"
+            "password": os.getenv("TEST_STUDENT_PASSWORD", "Pranathi@0509")
         }
     )
     

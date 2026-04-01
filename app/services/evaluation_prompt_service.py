@@ -84,7 +84,6 @@ CRITICAL JSON REQUIREMENTS:
     "behavioral_score": <number 1-10>,
     "coding_score": <number 1-10>,
     "integrity_verdict": "CLEAN" | "SUSPICIOUS" | "HIGH RISK",
-    "hire_recommendation": "STRONG HIRE" | "HIRE" | "NEEDS FURTHER EVALUATION" | "DO NOT HIRE",
     "strengths": ["list", "of", "strengths"],
     "areas_for_improvement": ["list", "of", "areas"],
     "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY... (ALL QUOTES ESCAPED)",
@@ -101,12 +100,13 @@ CRITICAL JSON REQUIREMENTS:
 The "overall_feedback" markdown MUST include:
 1. ### CANDIDATE SUMMARY
 2. ### SCORECARD (as a markdown table)
-3. ### HIRE RECOMMENDATION
-4. ### REASONING
-5. ### RED FLAGS (if any)
-6. ### STRENGTHS
-7. ### AREAS OF CONCERN
-8. ### CODING EVALUATION (per question data and scorecard)
+3. ### REASONING
+4. ### RED FLAGS (if any)
+5. ### STRENGTHS
+6. ### AREAS OF CONCERN
+7. ### CODING EVALUATION (per question data and scorecard)
+
+CRITICAL RULE: Do NOT use the terms "Hire" or "Do Not Hire" anywhere in your evaluation (including the Reasoning section). Provide objective analysis of the candidate's suitability without making a final hiring declaration.
 
 Be objective, evidence-based, and reference specific timestamps or quotes."""
 

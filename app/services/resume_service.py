@@ -208,11 +208,11 @@ class ResumeService:
         if not text:
             return text
         
-        # Remove spaces within words (common PyPDF2 artifact)
-        # Pattern: letter + space + lowercase letter (e.g., "Sc ale" -> "Scale")
-        text = re.sub(r'([a-z])\s+([a-z])', r'\1\2', text, flags=re.IGNORECASE)
+        # Remove spaces within words only if they appear to be single-letter artifacts (e.g., 'H U S S A I N' -> 'HUSSAIN')
+        # Using word boundaries to ensure we only merge if letters are standalone
+        text = re.sub(r'(?<=\b[a-zA-Z])\s+(?=[a-zA-Z]\b)', '', text)
         
-        # Remove spaces within uppercase words (e.g., "HUSS AIN" -> "HUSSAIN")
+        # Remove spaces within uppercase words (if they were missed by the boundary check)
         text = re.sub(r'([A-Z])\s+([A-Z])', r'\1\2', text)
         
         # Remove spaces around hyphens (e.g., "Scale- I" -> "Scale-I")

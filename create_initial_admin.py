@@ -26,23 +26,29 @@ def hash_password(password: str) -> str:
 def create_initial_admin():
     print("--- Create Initial Admin User ---")
     
-    # Defaults
-    default_email = "admin@example.com"
-    default_password = "admin"
-    default_username = "admin"
+    # Try to load from environment variables first
+    env_email = os.getenv("INITIAL_ADMIN_EMAIL")
+    env_password = os.getenv("INITIAL_ADMIN_PASSWORD")
+    env_username = os.getenv("INITIAL_ADMIN_USERNAME")
     
-    # Allow command line args or interactive
+    # Allow command line args, then environment variables, then error
     if len(sys.argv) > 1:
         email = sys.argv[1]
-        password = sys.argv[2] if len(sys.argv) > 2 else default_password
-        username = sys.argv[3] if len(sys.argv) > 3 else default_username
+        password = sys.argv[2] if len(sys.argv) > 2 else env_password
+        username = sys.argv[3] if len(sys.argv) > 3 else env_username
     else:
-        print(f"Using defaults (Run with: python create_initial_admin.py <email> <password> <username>)")
-        email = default_email
-        password = default_password
-        username = default_username
+        email = env_email
+        password = env_password
+        username = env_username
+
+    if not email or not password or not username:
+        print("❌ Error: Missing credentials.")
+        print("Please provide them via command line arguments or environment variables:")
+        print("  Usage: python create_initial_admin.py <email> <password> <username>")
+        print("  Env: INITIAL_ADMIN_EMAIL, INITIAL_ADMIN_PASSWORD, INITIAL_ADMIN_USERNAME")
+        sys.exit(1)
     
-    print(f"Creating Admin -> Email: {email}, Username: {username}, Password: {password}")
+    print(f"Creating Admin -> Email: {email}, Username: {username}")
     
     try:
         supabase = get_supabase()
