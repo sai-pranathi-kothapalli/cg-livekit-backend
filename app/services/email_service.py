@@ -159,6 +159,114 @@ class EmailService:
             logger.error(f"[EmailService] {error_msg}", exc_info=True)
             return False, error_msg
     
+    async def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        html_body: Optional[str] = None,
+    ) -> bool:
+        """
+        Generic email sender. Returns True if sent, False if failed.
+        Never raises — failures are logged and return False.
+        """
+        if not self.enabled:
+            logger.warning("[EmailService] SMTP not configured - skipping send_email")
+            return False
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f'"{self.config.smtp.from_name}" <{self.config.smtp.from_email}>'
+            msg["To"] = to_email
+
+            msg.attach(MIMEText(body, "plain"))
+            if html_body:
+                msg.attach(MIMEText(html_body, "html"))
+
+            use_tls = self.config.smtp.secure
+            start_tls = not self.config.smtp.secure
+
+            await aiosmtplib.send(
+                msg,
+                hostname=self.config.smtp.host,
+                port=self.config.smtp.port,
+                use_tls=use_tls,
+                start_tls=start_tls,
+                username=self.config.smtp.user,
+                password=self.config.smtp.password,
+                timeout=30.0,
+            )
+
+            logger.info(f"[EmailService] ✅ Email sent to {to_email}: {subject}")
+            return True
+
+        except aiosmtplib.SMTPAuthenticationError:
+            logger.error(
+                "[EmailService] ❌ SMTP authentication failed. "
+                "Check SMTP_USER and SMTP_PASSWORD. "
+                "If using Gmail, you need an App Password — "
+                "go to https://myaccount.google.com/apppasswords"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"[EmailService] ❌ Failed to send email to {to_email}: {e}", exc_info=True)
+            return False
+
+    async def send_otp_email(self, to_email: str, otp: str) -> bool:
+        """
+        Send a password reset OTP email.
+        Returns True if sent successfully, False otherwise.
+        """
+        subject = "Password Reset Code — Codegnan Interview Platform"
+
+        body = (
+            f"Your password reset code is: {otp}\n\n"
+            f"This code expires in 10 minutes.\n"
+            f"If you did not request this, please ignore this email.\n\n"
+            f"Do not share this code with anyone."
+        )
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 480px; margin: 0 auto; padding: 24px; }}
+        .header {{ background: linear-gradient(135deg, #002cf2 0%, #1fd5f9 100%); color: white; padding: 24px; text-align: center; border-radius: 8px 8px 0 0; }}
+        .content {{ background: #f9fafb; padding: 24px; border-radius: 0 0 8px 8px; }}
+        .otp-box {{ background: #fff; border: 2px solid #002cf2; border-radius: 8px; padding: 20px; text-align: center; margin: 16px 0; }}
+        .otp-code {{ font-size: 36px; font-weight: bold; letter-spacing: 10px; color: #002cf2; font-family: monospace; }}
+        .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2 style="margin:0;">Password Reset</h2>
+            <p style="margin:8px 0 0; font-size:14px; opacity:0.9;">Codegnan Interview Platform</p>
+        </div>
+        <div class="content">
+            <p>Your verification code is:</p>
+            <div class="otp-box">
+                <div class="otp-code">{otp}</div>
+            </div>
+            <p style="color:#718096; font-size:13px;">⏱ This code expires in <strong>10 minutes</strong>.</p>
+            <p style="color:#718096; font-size:13px;">If you did not request a password reset, please ignore this email.</p>
+            <p style="color:#e53e3e; font-size:13px;"><strong>Do not share this code with anyone.</strong></p>
+        </div>
+        <div class="footer">
+            <p>Codegnan Team &mdash; This is an automated message, please do not reply.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        return await self.send_email(to_email, subject, body, html_body)
+
     def _create_enrollment_email_html(self, name: str, email: str, temporary_password: str) -> str:
         """Create HTML email content for enrollment. Login link uses PUBLIC_FRONTEND_URL or FRONTEND_URL."""
         base = (

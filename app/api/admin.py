@@ -158,6 +158,9 @@ async def delete_manager(manager_id: str, current_admin: dict = Depends(get_curr
     Requires admin authentication.
     """
     try:
+        from app.utils.sanitize import sanitize_uuid
+        manager_id = sanitize_uuid(manager_id)
+        
         client = get_supabase()
         client.table("users").delete().eq("id", manager_id).eq("role", "manager").execute()
         return {"success": True, "message": f"Manager {manager_id} deleted"}
@@ -325,9 +328,10 @@ async def bulk_register_candidates(
 
         for idx, row in df.iterrows():
             try:
-                name = str(row.get("name") or "").strip()
-                email = str(row.get("email") or "").strip()
-                phone = str(row.get("phone") or "").strip()
+                from app.utils.sanitize import sanitize_name, sanitize_email, sanitize_phone
+                name = sanitize_name(str(row.get("name") or "").strip())
+                email = sanitize_email(str(row.get("email") or "").strip())
+                phone = sanitize_phone(str(row.get("phone") or "").strip())
                 dt_str = str(row.get("datetime") or "").strip()
 
                 if not name or not email or not dt_str:
@@ -463,7 +467,8 @@ async def get_all_candidates(
         query = client.table("interview_bookings").select("*", count="exact")
 
         if search:
-            search = search.strip()
+            from app.utils.sanitize import sanitize_string
+            search = sanitize_string(search.strip(), max_length=100)
             query = query.or_(
                 f"name.ilike.%{search}%,email.ilike.%{search}%"
             )
@@ -548,17 +553,17 @@ async def schedule_interview_for_user(
                 detail="Interview slot not found"
             )
         
-        # Check if slot is active and has available capacity
+        # Check if slot is active
+        if slot['status'] == 'full':
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This slot is fully booked. Please select another slot."
+            )
+        
         if slot['status'] != 'active':
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Slot is not available. Status: {slot['status']}"
-            )
-        
-        if slot['current_bookings'] >= slot['max_capacity']:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Slot is full. Capacity: {slot['current_bookings']}/{slot['max_capacity']}"
             )
         
         # Parse slot datetime - handle UTC or IST format properly
@@ -602,14 +607,17 @@ async def schedule_interview_for_user(
                 detail=f"Failed to create booking: {str(e)}"
             )
         
-        # Increment slot booking count
+        # Atomically increment slot booking count
         try:
-            success = slot_service.increment_booking_count(request.slot_id)
-            if success:
-                logger.info(f"[API] ✅ Incremented booking count for slot {request.slot_id}")
-            else:
-                logger.warning(f"[API] ⚠️ Failed to increment booking count - slot may be full")
-                # This shouldn't happen as we checked above, but handle it gracefully
+            slot_service.increment_booking_count(request.slot_id)
+            logger.info(f"[API] ✅ Incremented booking count for slot {request.slot_id}")
+        except ValueError as e:
+            # Slot became full between status check and increment — race condition caught
+            logger.warning(f"[API] Slot {request.slot_id} is full (caught at increment): {e}")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This slot is fully booked. Please select another slot."
+            )
         except Exception as e:
             logger.warning(f"[API] ⚠️ Failed to increment slot booking count: {str(e)}")
             # Don't fail the request if slot update fails, but log it
@@ -767,10 +775,13 @@ async def _process_bulk_schedule_data(http_request: Request, candidates: List[di
     # Give background tasks a moment to start
     await asyncio.sleep(0.1)
     
+    assignments = []
+    
     for idx, item in enumerate(candidates):
-        row_num = idx + 1
+        row_num = idx + 2 # Header is Row 1
         try:
-            email = item['email']
+            from app.utils.sanitize import sanitize_email
+            email = sanitize_email(item['email'])
             datetime_str = item['datetime']
             
             if not email or not datetime_str:
@@ -802,44 +813,56 @@ async def _process_bulk_schedule_data(http_request: Request, candidates: List[di
             if scheduled_at <= now:
                 raise ValueError(f"Scheduled time must be in the future (Time in IST: {scheduled_at.strftime('%Y-%m-%d %H:%M:%S')})")
             
-            # Create booking
+            # Create booking assignment entry
             auth_user = auth_service.get_user_by_email(user['email'])
             booking_user_id = auth_user['id'] if auth_user else None
             
-            token = booking_service.create_booking(
-                name=user.get('name', 'Student'),
-                email=email,
-                scheduled_at=scheduled_at,
-                phone=user.get('phone', ''),
-                user_id=booking_user_id,
-                prompt=prompt
-            )
-            
-            # Generate interview URL
-            base_url = get_frontend_url(http_request)
-            interview_url = f"{base_url}/interview/{token}" if base_url else f"/interview/{token}"
-            
-            # Helper for background email
-            async def send_email_wrapper(t_email, t_name, t_url, t_time):
-                try:
-                    await email_service.send_interview_email(
-                        to_email=t_email,
-                        name=t_name,
-                        interview_url=t_url,
-                        scheduled_at=t_time
-                    )
-                except Exception as e:
-                    logger.warning(f"[API] ⚠️ Bulk interview email failed for {t_email}: {e}")
-            
-            # Schedule email
-            asyncio.create_task(send_email_wrapper(email, user.get('name', 'Student'), interview_url, scheduled_at))
-            
-            successful += 1
-            logger.info(f"[API] ✅ Scheduled interview {idx + 1}/{total}: {email}")
-
+            from app.utils.sanitize import sanitize_for_llm
+            assignments.append({
+                'name': user.get('name', 'Student'),
+                'email': email,
+                'scheduled_at': scheduled_at,
+                'phone': user.get('phone', ''),
+                'user_id': booking_user_id,
+                'slot_id': item.get('slot_id'),
+                'prompt': sanitize_for_llm(prompt, max_length=5000) if prompt else None,
+                'row_num': row_num
+            })
         except Exception as e:
+            errors.append(f"Row {row_num} ({item.get('email', 'unknown')}): {str(e)}")
             failed += 1
-            errors.append(f"Row {row_num} ({item.get('email', '?')}): {str(e)}")
+
+    if assignments:
+        bulk_results = booking_service.bulk_create_bookings(assignments)
+        
+        # Helper for background email
+        async def send_email_wrapper(t_email, t_name, t_url, t_time):
+            try:
+                await email_service.send_interview_email(
+                    to_email=t_email,
+                    name=t_name,
+                    interview_url=t_url,
+                    scheduled_at=t_time
+                )
+            except Exception as e:
+                logger.warning(f"[API] ⚠️ Bulk interview email failed for {t_email}: {e}")
+
+        for res in bulk_results.get('successful', []):
+            t_email = res['email']
+            t_token = res['booking_token']
+            base_url = get_frontend_url(http_request)
+            interview_url = f"{base_url}/interview/{t_token}" if base_url else f"/interview/{t_token}"
+            
+            assignment = next((a for a in assignments if a['email'] == t_email), None)
+            if assignment:
+                asyncio.create_task(send_email_wrapper(t_email, assignment['name'], interview_url, assignment['scheduled_at']))
+            successful += 1
+            
+        for res in bulk_results.get('failed', []):
+            assignment = next((a for a in assignments if a['email'] == res['email']), None)
+            row_prefix = f"Row {assignment['row_num']} " if assignment else ""
+            errors.append(f"{row_prefix}({res.get('email', 'unknown')}): {res.get('reason')}")
+            failed += 1
             
     return BulkScheduleInterviewResponse(
         success=True,
@@ -848,3 +871,10 @@ async def _process_bulk_schedule_data(http_request: Request, candidates: List[di
         failed=failed,
         errors=errors
     )
+
+
+@router.get("/slots/{slot_id}/check-consistency")
+async def check_consistency(slot_id: str, current_admin: dict = Depends(get_current_admin)):
+    """Check if a slot's booked_count matches actual active bookings."""
+    result = booking_service.check_slot_consistency(slot_id)
+    return result

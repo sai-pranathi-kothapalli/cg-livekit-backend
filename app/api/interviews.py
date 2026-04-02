@@ -46,6 +46,12 @@ async def get_evaluation(token: str):
     Returns:
         Complete evaluation including transcript, metrics, rounds, and scores
     """
+    from app.utils.sanitize import sanitize_uuid
+    try:
+        token = sanitize_uuid(token)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     try:
         # Get booking
         booking = booking_service.get_booking(token)

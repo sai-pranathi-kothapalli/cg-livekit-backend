@@ -185,25 +185,31 @@ async def select_slot(
         slot_datetime_str = slot.get('slot_datetime') or slot.get('start_time')
         scheduled_at = parse_datetime_safe(slot_datetime_str)
 
-        # 6. Create booking
-        token = booking_service.create_booking(
-            name=current_student.get('name', enrolled_user.get('name', 'Student') if enrolled_user else 'Student'),
-            email=student_email,
-            scheduled_at=scheduled_at,
-            phone=current_student.get('phone', enrolled_user.get('phone', '') if enrolled_user else ''),
-            application_text=None, # Form removed
-            application_url=None,
-            slot_id=slot_id,
-            user_id=auth_user_id, # Use Auth ID for the booking record
-            assignment_id=assignment['id'],
-            application_form_id=None, # Form removed
-            prompt=prompt # Include the prompt from the request
-        )
+        # 6. Create booking (atomic)
+        try:
+            token = booking_service.create_booking(
+                name=current_student.get('name', enrolled_user.get('name', 'Student') if enrolled_user else 'Student'),
+                email=student_email,
+                scheduled_at=scheduled_at,
+                phone=current_student.get('phone', enrolled_user.get('phone', '') if enrolled_user else ''),
+                application_text=None,
+                application_url=None,
+                slot_id=slot_id,
+                user_id=auth_user_id,
+                assignment_id=assignment['id'],
+                application_form_id=None,
+                prompt=prompt
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-        # 7. Update status: mark assignment used, cancel others, increment count
+        # 7. Update status: mark assignment used, cancel others
+        # Note: slot_service.increment_booking_count is now handled safely inside create_booking
         assignment_service.select_slot_for_user(auth_user_id, assignment['id'])
         assignment_service.cancel_other_assignments(auth_user_id, assignment['id'])
-        slot_service.increment_booking_count(slot_id)
+        
         user_service.update_user(auth_user_id, interview_status='slot_selected')
 
         # 8. Generate interview URL and send email

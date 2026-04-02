@@ -6,7 +6,8 @@ Moved from app.api.main without changing fields or validation.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from app.utils.sanitize import sanitize_string
 
 
 class CreateSlotRequest(BaseModel):
@@ -15,12 +16,26 @@ class CreateSlotRequest(BaseModel):
     duration_minutes: int = Field(default=30, example=60)  # Interview duration in minutes (default 30)
     notes: Optional[str] = Field(None, example="Morning interview slot")
 
+    @field_validator('notes')
+    @classmethod
+    def clean_notes(cls, v):
+        if v:
+            return sanitize_string(v, max_length=2000)
+        return v
+
 
 class UpdateSlotRequest(BaseModel):
     slot_datetime: Optional[str] = Field(None, example="2026-02-15T11:00:00+05:30")
     max_capacity: Optional[int] = Field(None, example=20)
     status: Optional[str] = Field(None, example="cancelled")
     notes: Optional[str] = Field(None, example="Rescheduled due to availability")
+
+    @field_validator('notes')
+    @classmethod
+    def clean_notes(cls, v):
+        if v:
+            return sanitize_string(v, max_length=2000)
+        return v
 
 
 class SlotResponse(BaseModel):

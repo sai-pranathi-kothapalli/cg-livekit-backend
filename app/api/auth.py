@@ -4,7 +4,8 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     ChangePasswordRequest,
-    ResetPasswordRequest,
+    PasswordResetRequestSchema,
+    PasswordResetVerifySchema,
     StudentRegisterRequest,
     AdminLoginRequest,
     AdminLoginResponse,
@@ -12,6 +13,8 @@ from app.schemas.auth import (
 from app.services.container import (
     auth_service,
     admin_service,
+    otp_service,
+    email_service,
 )
 from app.utils.logger import get_logger
 from app.utils.limiter import limiter
@@ -31,10 +34,14 @@ def login(request: Request, body: LoginRequest):
   Rate limited to 15 requests per minute per IP.
   """
   try:
-    logger.info(f"[API] Login attempt: {body.username}")
+    identifier = body.get_login_identifier()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="Email or username is required")
+        
+    logger.info(f"[API] Login attempt: {identifier}")
 
     # Unified authentication -> single database round trip
-    user = auth_service.authenticate_unified(body.username, body.password)
+    user = auth_service.authenticate_unified(identifier, body.password)
     
     if user:
       role = user.get('role', 'student')
@@ -44,7 +51,7 @@ def login(request: Request, body: LoginRequest):
           role=role,
           username=user.get('username') or user.get('email')
         )
-        logger.info(f"[API] ✅ {role.capitalize()} login successful: {body.username}")
+        logger.info(f"[API] ✅ {role.capitalize()} login successful: {identifier}")
         return LoginResponse(
           success=True,
           token=token,
@@ -64,7 +71,7 @@ def login(request: Request, body: LoginRequest):
           role='student',
           email=user['email']
         )
-        logger.info(f"[API] ✅ Student login successful: {body.username}")
+        logger.info(f"[API] ✅ Student login successful: {identifier}")
         return LoginResponse(
           success=True,
           token=token,
@@ -80,7 +87,7 @@ def login(request: Request, body: LoginRequest):
         )
 
     # Authentication failed
-    logger.warning(f"[API] Login failed: {body.username}")
+    logger.warning(f"[API] Login failed: {identifier}")
     return LoginResponse(
       success=False,
       error="Invalid credentials"
@@ -119,40 +126,79 @@ async def change_password(request: ChangePasswordRequest):
   return {"success": True, "message": "Password updated successfully"}
 
 
+@router.post("/request-password-reset")
+@limiter.limit("5/minute")
+async def request_password_reset(request: Request, body: PasswordResetRequestSchema):
+    """
+    Step 1 of password reset: send a 6-digit OTP to the provided email.
+
+    Always returns the same response whether the email exists or not,
+    to prevent email enumeration attacks.
+    Rate limited to 5 requests/minute per IP.
+    """
+    _SAFE_RESPONSE = {
+        "message": "If an account with this email exists, a reset code has been sent.",
+        "expires_in_minutes": otp_service.OTP_EXPIRY_MINUTES,
+    }
+    try:
+        email = body.email.strip().lower()
+        user = auth_service.get_user_by_email(email)
+
+        if user:
+            otp = otp_service.create_otp(email)
+            # Fire-and-forget: don't block or leak errors to caller
+            try:
+                await email_service.send_otp_email(email, otp)
+                logger.info(f"[API] OTP email sent to {email}")
+            except Exception as email_err:
+                logger.error(f"[API] OTP email failed for {email}: {email_err}")
+        else:
+            logger.info(f"[API] Password reset requested for unknown email: {email} (ignored)")
+
+        return _SAFE_RESPONSE
+
+    except Exception as e:
+        logger.error(f"[API] request_password_reset error: {e}", exc_info=True)
+        # Always return safe response — never leak internal errors
+        return _SAFE_RESPONSE
+
+
 @router.post("/reset-password")
-async def reset_password(request: ResetPasswordRequest):
-  """
-  Reset password for a student or manager (forgot password flow).
-  In this implementation, we allow resetting by email for simplicity.
-  In production, this would require a verification token or OTP.
-  """
-  try:
-    # Check if user exists and is a student or manager
-    user = auth_service.get_user_by_email(request.email)
-    if not user or user.get('role') not in ['student', 'manager']:
-      logger.warning(f"[API] Reset password failed: User {request.email} not found or invalid role")
-      raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="User with this email not found"
-      )
+async def reset_password(body: PasswordResetVerifySchema):
+    """
+    Step 2 of password reset: verify OTP and set a new password.
 
-    ok = auth_service.reset_password(request.email, request.new_password)
-    if not ok:
-      raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Failed to reset password"
-      )
+    Requires email + 6-digit OTP (from email) + new password.
+    OTP is validated for expiry, correct value, and attempt count.
+    """
+    try:
+        email = body.email.strip().lower()
 
-    logger.info(f"[API] ✅ Password reset successfully for {request.email} ({user.get('role')})")
-    return {"success": True, "message": "Password reset successfully"}
-  except HTTPException:
-    raise
-  except Exception as e:
-    logger.error(f"[API] Reset password error: {str(e)}")
-    raise HTTPException(
-      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-      detail=str(e)
-    )
+        # Verify OTP — raises ValueError with user-friendly message on failure
+        otp_service.verify_otp(email, body.otp)
+
+        # OTP is valid — reset the password
+        ok = auth_service.reset_password(email, body.new_password)
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update password. Please try again."
+            )
+
+        logger.info(f"[API] ✅ Password reset successfully for {email}")
+        return {"success": True, "message": "Password has been reset successfully."}
+
+    except ValueError as e:
+        # OTP verification failure — return the specific reason to the user
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] reset_password error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred. Please try again."
+        )
 
 
 @router.post("/student/register", response_model=LoginResponse)

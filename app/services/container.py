@@ -10,18 +10,20 @@ from app.services.slot_service import SlotService
 from app.services.assignment_service import AssignmentService
 from app.services.transcript_storage_service import TranscriptStorageService
 from app.services.evaluation_service import EvaluationService
+from app.services.otp_service import OTPService
 
 config = get_config()
 
 # Initialize services
 resume_service = ResumeService(config)
-booking_service = BookingService(config)
+slot_service = SlotService(config)
+booking_service = BookingService(config, slot_service)
 email_service = EmailService(config)
 system_instructions_service = SystemInstructionsService(config)
 admin_service = AdminService(config)
 auth_service = AuthService(config)
 user_service = UserService(config)
-slot_service = SlotService(config)
 assignment_service = AssignmentService(config)
 transcript_storage_service = TranscriptStorageService(config)
 evaluation_service = EvaluationService(config)
+otp_service = OTPService(config)

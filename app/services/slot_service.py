@@ -263,32 +263,80 @@ class SlotService:
         return created_slots, errors
 
 
-    def increment_booking_count(self, slot_id: str) -> bool:
+    def increment_booking_count(self, slot_id: str) -> dict:
+        """
+        Atomically increment the booking count for a slot.
+
+        Uses a single PostgreSQL UPDATE with a WHERE guard (via RPC) to
+        guarantee there is no read-check-write race condition under concurrent
+        load. PostgreSQL serialises the update at the row level, so only one
+        request can win when the last seat is taken.
+
+        Returns:
+            dict: The updated slot row (id, booked_count, capacity, status).
+
+        Raises:
+            ValueError: Slot is full, doesn't exist, or status is 'full'.
+            Exception: Unexpected database error.
+        """
         try:
-            # Get current state
-            # We can't use self.get_slot because returns mapped dict
-            # Need raw DB data to be safe, or just use mapped and map back
-            response = self.client.table("slots").select("*").eq("id", slot_id).execute()
-            if not response.data:
-                return False
-            
-            slot_db = response.data[0]
-            current_count = slot_db.get("booked_count", 0)
-            capacity = slot_db.get("capacity", 1)
-            
-            new_count = current_count + 1
-            
-            updates = {
-                "booked_count": new_count,
-                "updated_at": get_now_ist().isoformat()
-            }
-            
-            if new_count >= capacity:
-                updates["status"] = "full"
-            
-            response = self.client.table("slots").update(updates).eq("id", slot_id).execute()
-            
-            return bool(response.data)
+            result = self.client.rpc(
+                "atomic_book_slot",
+                {"p_slot_id": slot_id}
+            ).execute()
+
+            if not result.data or len(result.data) == 0:
+                raise ValueError(
+                    f"Slot {slot_id} is fully booked or does not exist"
+                )
+
+            logger.info(
+                f"[SlotService] Atomic book slot {slot_id}: "
+                f"booked_count={result.data[0].get('booked_count')}, "
+                f"status={result.data[0].get('status')}"
+            )
+            return result.data[0]
+
+        except ValueError:
+            raise
         except Exception as e:
-            logger.error(f"Error incrementing booking count: {e}")
-            return False
+            logger.error(f"Error atomically incrementing booking count for {slot_id}: {e}")
+            raise Exception(f"Failed to book slot {slot_id}: {str(e)}")
+
+    def decrement_booking_count(self, slot_id: str) -> dict:
+        """
+        Atomically release one booking from a slot (used on cancellation).
+
+        Uses a single PostgreSQL UPDATE with a WHERE guard (via RPC).
+        Sets status back to 'available' if the count drops below capacity.
+
+        Returns:
+            dict: The updated slot row.
+
+        Raises:
+            ValueError: Slot has no bookings to release or doesn't exist.
+            Exception: Unexpected database error.
+        """
+        try:
+            result = self.client.rpc(
+                "atomic_release_slot",
+                {"p_slot_id": slot_id}
+            ).execute()
+
+            if not result.data or len(result.data) == 0:
+                raise ValueError(
+                    f"Slot {slot_id} has no bookings to release or does not exist"
+                )
+
+            logger.info(
+                f"[SlotService] Atomic release slot {slot_id}: "
+                f"booked_count={result.data[0].get('booked_count')}, "
+                f"status={result.data[0].get('status')}"
+            )
+            return result.data[0]
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"Error atomically decrementing booking count for {slot_id}: {e}")
+            raise Exception(f"Failed to release slot {slot_id}: {str(e)}")

@@ -23,9 +23,10 @@ logger = get_logger(__name__)
 class BookingService:
     """Service for managing interview bookings using Supabase"""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, slot_service=None):
         self.config = config
         self.client = get_supabase()
+        self.slot_service = slot_service
 
     def create_booking(
         self,
@@ -39,11 +40,56 @@ class BookingService:
         user_id: Optional[str] = None,
         assignment_id: Optional[str] = None,
         application_form_id: Optional[str] = None,
-        prompt: Optional[str] = None,  # NEW: Per-interview prompt
+        prompt: Optional[str] = None,
     ) -> str:
-        """Create a new interview booking in Supabase."""
+        """Create a new interview booking with transactional guarantees."""
+        token = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+        
+        # === PRE-CHECKS ===
+        if slot_id:
+            try:
+                slot = self.client.table('slots').select('*').eq('id', slot_id).single().execute()
+                if not slot.data:
+                    raise ValueError("Slot not found")
+                slot_data = slot.data
+                if slot_data.get('status') == 'full' or slot_data.get('booked_count', 0) >= slot_data.get('capacity', 999):
+                    raise ValueError("This slot is fully booked. Please select another slot.")
+            except ValueError:
+                raise
+            except Exception as e:
+                raise Exception(f"Failed to fetch slot: {str(e)}")
+
+            if user_id:
+                try:
+                    # Check existing booking for this exact slot
+                    existing = self.client.table('interview_bookings').select('id').eq('user_id', user_id).eq('slot_id', slot_id).eq('status', 'scheduled').execute()
+                    if existing.data and len(existing.data) > 0:
+                        raise ValueError("You already have a booking for this slot.")
+                        
+                    # Check conflicting bookings at the same time
+                    slot_datetime = slot_data.get('slot_datetime')
+                    if slot_datetime:
+                        conflicting = self.client.table('interview_bookings').select('id').eq('user_id', user_id).eq('status', 'scheduled').eq('scheduled_at', slot_datetime).execute()
+                        if conflicting.data and len(conflicting.data) > 0:
+                            raise ValueError("You already have an interview scheduled at this time. Please select a different time slot.")
+                except ValueError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Could not check existing bookings: {str(e)}")
+
+        # === STEP 3: ATOMIC RESERVE SLOT ===
+        if slot_id and self.slot_service:
+            try:
+                updated_slot = self.slot_service.increment_booking_count(slot_id)
+                logger.info(f"Slot {slot_id} reserved for user {user_id}. Count: {updated_slot.get('booked_count')}")
+            except ValueError as e:
+                # Slot is full (atomic check failed)
+                raise ValueError(str(e))
+            except Exception as e:
+                raise Exception(f"Failed to reserve slot: {str(e)}")
+                
+        # === STEP 4: CREATE BOOKING ===
         try:
-            token = "".join(random.choices(string.ascii_letters + string.digits, k=32))
             booking_data = {
                 "id": str(uuid.uuid4()),
                 "token": token,
@@ -53,7 +99,7 @@ class BookingService:
                 "scheduled_at": scheduled_at.isoformat(),
                 "application_text": application_text,
                 "application_url": application_url,
-                "prompt": prompt,  # NEW
+                "prompt": prompt,
                 "slot_id": slot_id,
                 "user_id": user_id,
                 "assignment_id": assignment_id,
@@ -61,10 +107,31 @@ class BookingService:
                 "status": "scheduled",
                 "created_at": get_now_ist().isoformat(),
             }
-            self.client.table("interview_bookings").insert(booking_data).execute()
+            result = self.client.table("interview_bookings").insert(booking_data).execute()
+            
+            if not result.data or len(result.data) == 0:
+                raise Exception("Booking insert returned empty result")
+                
+            logger.info(f"Booking created: token={token}, user={user_id}, slot={slot_id}")
             return token
+            
         except Exception as e:
-            logger.error(f"Error creating booking: {e}")
+            # === COMPENSATION: UNDO SLOT RESERVE ===
+            if slot_id and self.slot_service:
+                logger.error(
+                    f"Booking creation failed for user {user_id}, slot {slot_id}: {str(e)}. "
+                    f"COMPENSATING: releasing slot reservation."
+                )
+                try:
+                    self.slot_service.decrement_booking_count(slot_id)
+                    logger.info(f"Compensation successful: slot {slot_id} released.")
+                except Exception as comp_error:
+                    logger.critical(
+                        f"COMPENSATION FAILED! Slot {slot_id} has a phantom reservation. "
+                        f"Manual fix required. Original error: {str(e)}. "
+                        f"Compensation error: {str(comp_error)}"
+                    )
+            
             raise AgentError(f"Failed to create booking: {str(e)}", "BookingService")
 
     def get_booking(self, token: str) -> Optional[Dict[str, Any]]:
@@ -184,3 +251,147 @@ class BookingService:
             logger.error(f"Error uploading application to storage: {e}")
             # Fallback: return empty or raise
             raise AgentError(f"Failed to upload to Supabase Storage: {str(e)}", "BookingService")
+
+    def cancel_booking(self, booking_id: str, user_id: Optional[str] = None) -> dict:
+        """Cancel a booking with transactional guarantees."""
+        try:
+            query = self.client.table('interview_bookings').select('*').eq('id', booking_id)
+            if user_id:
+                query = query.eq('user_id', user_id)
+            result = query.single().execute()
+            
+            if not result.data:
+                raise ValueError("Booking not found or you don't have permission to cancel it.")
+                
+            booking = result.data
+            if booking.get('status') != 'scheduled':
+                raise ValueError(
+                    f"Cannot cancel booking with status '{booking.get('status')}'. "
+                    f"Only 'scheduled' bookings can be cancelled."
+                )
+        except ValueError:
+            raise
+        except Exception as e:
+            raise Exception(f"Failed to fetch booking: {str(e)}")
+
+        slot_id = booking.get('slot_id')
+
+        # Step 2: Cancel the booking
+        try:
+            self.client.table('interview_bookings').update({
+                'status': 'cancelled',
+            }).eq('id', booking_id).execute()
+            logger.info(f"Booking {booking_id} cancelled for slot {slot_id}")
+        except Exception as e:
+            raise Exception(f"Failed to cancel booking: {str(e)}")
+
+        # Step 3: Release the slot capacity
+        if slot_id and self.slot_service:
+            try:
+                self.slot_service.decrement_booking_count(slot_id)
+                logger.info(f"Slot {slot_id} capacity released after cancellation")
+            except Exception as e:
+                logger.critical(
+                    f"SLOT RELEASE FAILED after booking {booking_id} cancellation! "
+                    f"Slot {slot_id} may have phantom reservation. "
+                    f"Manual fix required. Error: {str(e)}"
+                )
+
+        return {"message": "Booking cancelled successfully", "booking_id": booking_id}
+
+    def cancel_booking_by_token(self, token: str) -> dict:
+        try:
+            result = self.client.table('interview_bookings').select('*').eq('token', token).execute()
+            if not result.data:
+                raise ValueError("Booking not found.")
+            booking = result.data[0]
+            return self.cancel_booking(booking['id'])
+        except Exception as e:
+            raise e
+
+    def bulk_create_bookings(
+        self,
+        assignments: List[Dict[str, Any]],
+    ) -> dict:
+        """Create multiple bookings with per-booking compensation."""
+        results = {
+            'successful': [],
+            'failed': [],
+            'total': len(assignments),
+        }
+
+        for assignment in assignments:
+            try:
+                token = self.create_booking(
+                    name=assignment.get('name', 'Student'),
+                    email=assignment['email'],
+                    scheduled_at=assignment['scheduled_at'],
+                    phone=assignment.get('phone', ''),
+                    slot_id=assignment.get('slot_id'),
+                    user_id=assignment.get('user_id'),
+                    prompt=assignment.get('prompt')
+                )
+                results['successful'].append({
+                    'user_id': assignment.get('user_id'),
+                    'email': assignment['email'],
+                    'booking_token': token,
+                })
+            except ValueError as e:
+                results['failed'].append({
+                    'user_id': assignment.get('user_id'),
+                    'email': assignment['email'],
+                    'reason': str(e),
+                })
+            except Exception as e:
+                results['failed'].append({
+                    'user_id': assignment.get('user_id'),
+                    'email': assignment['email'],
+                    'reason': f"System error: {str(e)}",
+                })
+
+        logger.info(
+            f"Bulk booking: {len(results['successful'])} succeeded, "
+            f"{len(results['failed'])} failed out of {results['total']}"
+        )
+
+        return results
+
+    def check_slot_consistency(self, slot_id: str) -> dict:
+        """Compare a slot's booked_count against actual active bookings."""
+        slot = self.client.table('slots').select(
+            'booked_count, capacity'
+        ).eq('id', slot_id).single().execute()
+        
+        if not slot.data:
+            return {"error": "Slot not found"}
+
+        recorded_count = slot.data.get('booked_count', 0)
+
+        bookings = self.client.table('interview_bookings').select(
+            'id', count='exact'
+        ).eq(
+            'slot_id', slot_id
+        ).eq(
+            'status', 'scheduled'
+        ).execute()
+
+        actual_count = bookings.count if bookings.count is not None else len(bookings.data or [])
+
+        if recorded_count != actual_count:
+            logger.warning(
+                f"INCONSISTENCY: Slot {slot_id} has booked_count={recorded_count} "
+                f"but {actual_count} active bookings."
+            )
+            return {
+                "slot_id": slot_id,
+                "consistent": False,
+                "recorded_count": recorded_count,
+                "actual_count": actual_count,
+                "difference": recorded_count - actual_count,
+            }
+
+        return {
+            "slot_id": slot_id,
+            "consistent": True,
+            "count": recorded_count,
+        }

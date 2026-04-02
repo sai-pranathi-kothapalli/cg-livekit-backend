@@ -5,7 +5,8 @@ Moved from app.api.main without changing fields or validation.
 
 from typing import List, Optional, Any
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from app.utils.sanitize import sanitize_email, sanitize_name, sanitize_phone, sanitize_string
 
 
 class EnrollUserRequest(BaseModel):
@@ -15,6 +16,28 @@ class EnrollUserRequest(BaseModel):
     notes: Optional[str] = Field(None, example="Highly recommended candidate")
     slot_ids: List[str] = Field(default=[], description="List of slot IDs to assign (minimum 10 recommended).", example=["bc7d68f3-982b-4dbe-95bb-8d5621ac88cc"])
 
+    @field_validator('name')
+    @classmethod
+    def clean_name(cls, v):
+        return sanitize_name(v)
+
+    @field_validator('email')
+    @classmethod
+    def clean_email(cls, v):
+        return sanitize_email(v)
+
+    @field_validator('phone')
+    @classmethod
+    def clean_phone(cls, v):
+        return sanitize_phone(v or "")
+
+    @field_validator('notes')
+    @classmethod
+    def clean_notes(cls, v):
+        if v:
+            return sanitize_string(v, max_length=2000)
+        return v
+
 
 class UpdateUserRequest(BaseModel):
     name: Optional[str] = Field(None, example="Jane X. Doe")
@@ -22,6 +45,34 @@ class UpdateUserRequest(BaseModel):
     phone: Optional[str] = Field(None, example="0987654321")
     status: Optional[str] = Field(None, example="inactive")
     notes: Optional[str] = Field(None, example="Updated notes")
+
+    @field_validator('name')
+    @classmethod
+    def clean_name(cls, v):
+        if v:
+            return sanitize_name(v)
+        return v
+
+    @field_validator('email')
+    @classmethod
+    def clean_email(cls, v):
+        if v:
+            return sanitize_email(v)
+        return v
+
+    @field_validator('phone')
+    @classmethod
+    def clean_phone(cls, v):
+        if v:
+            return sanitize_phone(v)
+        return v
+
+    @field_validator('notes')
+    @classmethod
+    def clean_notes(cls, v):
+        if v:
+            return sanitize_string(v, max_length=2000)
+        return v
 
 
 class UserResponse(BaseModel):
@@ -84,6 +135,14 @@ class BulkScheduleItem(BaseModel):
 class BulkScheduleRequest(BaseModel):
     prompt: Optional[str] = Field(None, example="Focus on leadership skills and team management.")
     candidates: List[BulkScheduleItem] = Field(..., example=[{"email": "c1@example.com", "datetime": "2026-02-14T10:00:00+05:30"}])
+
+    @field_validator('prompt')
+    @classmethod
+    def clean_prompt(cls, v):
+        if v:
+            from app.utils.sanitize import sanitize_for_llm
+            return sanitize_for_llm(v, max_length=5000)
+        return v
 
 
 __all__ = [

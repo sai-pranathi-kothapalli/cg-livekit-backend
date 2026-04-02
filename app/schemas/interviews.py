@@ -5,7 +5,8 @@ Moved from app.api.main without changing fields or validation.
 
 from typing import Dict, List, Optional, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from app.utils.sanitize import sanitize_string, sanitize_code
 
 from app.schemas.bookings import BookingResponse
 
@@ -56,6 +57,21 @@ class CodeAnalysisRequest(BaseModel):
     question: str
     code: str
     language: str
+
+    @field_validator('question')
+    @classmethod
+    def clean_question(cls, v):
+        return sanitize_string(v, max_length=2000)
+
+    @field_validator('code')
+    @classmethod
+    def clean_code(cls, v):
+        return sanitize_code(v)
+
+    @field_validator('language')
+    @classmethod
+    def clean_language(cls, v):
+        return sanitize_string(v, max_length=50)
 
 
 class CodeAnalysisResponse(BaseModel):
