@@ -403,7 +403,24 @@ async def connection_details(
             room_metadata_dict["booking_token"] = booking_token
             room_metadata_dict["token"] = booking_token
 
-        # Metadata dictionary for room (application_text + booking_token)
+        # Extracted curriculum topics & batch
+        if booking_token:  # Use the local `booking` dict carefully because it can be None if unauthenticated
+            try:
+                booking = booking_service.get_booking(booking_token)
+                if booking and booking.get('slot_id'):
+                    from app.db.supabase import get_supabase
+                    supa = get_supabase()
+                    slot_data = supa.table('slots').select(
+                        'curriculum_topics, batch'
+                    ).eq('id', booking.get('slot_id')).limit(1).execute()
+
+                    if slot_data.data:
+                        if slot_data.data[0].get('curriculum_topics'):
+                            room_metadata_dict['curriculum_topics'] = slot_data.data[0]['curriculum_topics']
+                        if slot_data.data[0].get('batch'):
+                            room_metadata_dict['batch'] = slot_data.data[0]['batch']
+            except Exception as e:
+                logger.warning(f"[API] Failed to fetch slot metadata: {e}")
 
         room_metadata = json.dumps(room_metadata_dict) if room_metadata_dict else None
 

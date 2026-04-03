@@ -118,7 +118,6 @@ class EvaluationService:
                 evaluation_id = response.data[0]["id"]
                 self.client.table("evaluations").update(evaluation_data).eq("booking_token", booking_token).execute()
                 logger.info(f"✅ Updated evaluation {evaluation_id} for booking {booking_token}. Score: {evaluation_data.get('overall_score')}")
-                return evaluation_id
             else:
                 # Create new
                 evaluation_data["id"] = str(uuid.uuid4())
@@ -128,7 +127,59 @@ class EvaluationService:
                     logger.error(f"❌ Failed to insert evaluation: {response}")
                 evaluation_id = response.data[0]["id"] if response.data else evaluation_data["id"]
                 logger.info(f"✅ Created evaluation {evaluation_id} for booking {booking_token}. Score: {evaluation_data.get('overall_score')}")
-                return evaluation_id
+            
+            # --- WEBHOOK TRIGGER START ---
+            try:
+                from app.services.container import webhook_service
+
+                # Build webhook payload matching what LMS expects
+                webhook_payload = {
+                    "booking_token": booking_token,
+                    "student_id": None,  # Will be enriched below
+                    "batch": None,       # Will be enriched below
+                    "overall_score": evaluation_data.get("overall_score"),
+                    "technical_knowledge": evaluation_data.get("technical_knowledge"),
+                    "communication_quality": evaluation_data.get("communication_quality"),
+                    "problem_solving": evaluation_data.get("problem_solving"),
+                    "coding_score": evaluation_data.get("coding_score"),
+                    "feedback": evaluation_data.get("overall_feedback", ""),
+                    "completed_at": datetime.utcnow().isoformat(),
+                }
+
+                # Enrich with student_id and batch from booking
+                try:
+                    booking_enrich = self.client.table('interview_bookings').select(
+                        'user_id, batch'
+                    ).eq('token', booking_token).limit(1).execute()
+
+                    if booking_enrich.data:
+                        webhook_payload["batch"] = booking_enrich.data[0].get("batch")
+
+                        user_id = booking_enrich.data[0].get("user_id")
+                        if user_id:
+                            user_enrich = self.client.table('enrolled_users').select(
+                                'external_student_id'
+                            ).eq('id', user_id).limit(1).execute()
+
+                            if user_enrich.data:
+                                webhook_payload["student_id"] = user_enrich.data[0].get("external_student_id")
+                except Exception:
+                    pass  # Non-critical enrichment
+
+                # Fire webhook asynchronously (don't block the evaluation save)
+                import asyncio
+                asyncio.create_task(
+                    webhook_service.fire_webhook(
+                        event="EVALUATION_COMPLETED",
+                        payload=webhook_payload,
+                        batch=webhook_payload.get("batch"),
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to trigger evaluation webhook: {str(e)}")
+            # --- WEBHOOK TRIGGER END ---
+
+            return evaluation_id
         except Exception as e:
             logger.error(f"❌ Error creating evaluation: {e}", exc_info=True)
             return None
@@ -1283,3 +1334,79 @@ Be encouraging but honest.
                 "history": [],
                 "error": str(e)
             }
+
+    def get_evaluation_with_context(self, booking_token: str) -> Optional[Dict[str, Any]]:
+        """
+        Get evaluation with enriched context for integration responses.
+        Includes: scores, feedback, transcript, student external ID, batch.
+        """
+        # Fetch evaluation
+        try:
+            eval_result = self.client.table('evaluations').select('*').eq(
+                'booking_token', booking_token
+            ).limit(1).execute()
+
+            if not eval_result.data:
+                return None
+
+            evaluation = eval_result.data[0]
+        except Exception as e:
+            logger.error(f"Error fetching evaluation: {e}")
+            return None
+
+        # Fetch transcript
+        try:
+            transcript_result = self.client.table('transcripts').select(
+                'transcript'
+            ).eq(
+                'booking_token', booking_token
+            ).limit(1).execute()
+
+            transcript = transcript_result.data[0].get('transcript') if transcript_result.data else None
+        except Exception:
+            transcript = None
+
+        # Fetch booking → enrolled_user to get external_student_id and batch
+        external_student_id = None
+        batch = None
+        try:
+            booking_result = self.client.table('interview_bookings').select(
+                'user_id, batch'
+            ).eq(
+                'token', booking_token
+            ).limit(1).execute()
+
+            if booking_result.data:
+                batch = booking_result.data[0].get('batch')
+                user_id = booking_result.data[0].get('user_id')
+
+                if user_id:
+                    user_result = self.client.table('enrolled_users').select(
+                        'external_student_id'
+                    ).eq(
+                        'id', user_id
+                    ).limit(1).execute()
+
+                    if user_result.data:
+                        external_student_id = user_result.data[0].get('external_student_id')
+        except Exception:
+            pass  # Non-critical enrichment
+
+        # Build enriched response
+        return {
+            "booking_token": booking_token,
+            "student_id": external_student_id,
+            "batch": batch,
+            "overall_score": evaluation.get('overall_score'),
+            "technical_knowledge": evaluation.get('technical_knowledge'),
+            "communication_quality": evaluation.get('communication_quality'),
+            "problem_solving": evaluation.get('problem_solving'),
+            "coding_score": evaluation.get('coding_score'),
+            "strengths": evaluation.get('strengths'),
+            "areas_for_improvement": evaluation.get('areas_for_improvement'),
+            "overall_feedback": evaluation.get('overall_feedback'),
+            "transcript": transcript,
+            "parse_status": evaluation.get('parse_status'),
+            "evaluated_at": evaluation.get('evaluated_at'),
+            "completed_at": evaluation.get('evaluated_at'),
+        }

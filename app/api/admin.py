@@ -878,3 +878,55 @@ async def check_consistency(slot_id: str, current_admin: dict = Depends(get_curr
     """Check if a slot's booked_count matches actual active bookings."""
     result = booking_service.check_slot_consistency(slot_id)
     return result
+
+
+@router.post("/integration/generate-key")
+async def generate_api_key(
+    request: dict,  # { "name": "Codegnan LMS", "description": "Production key" }
+    current_user: dict = Depends(get_current_admin)
+):
+    """
+    Admin-only: Generate a new integration API key.
+    Returns the plain key ONCE — it cannot be retrieved after this.
+    """
+    import secrets
+    import hashlib
+
+    name = request.get("name", "Integration Key")
+    description = request.get("description", "")
+
+    # Generate a secure random key
+    plain_key = f"cgn_live_{secrets.token_hex(24)}"
+    hashed_key = hashlib.sha256(plain_key.encode()).hexdigest()
+
+    # Store the hashed version
+    client = get_supabase()
+    result = client.table('api_keys').insert({
+        'name': name,
+        'description': description,
+        'hashed_key': hashed_key,
+        'permissions': ['integration'],
+        'status': 'active',
+    }).execute()
+
+    return {
+        "success": True,
+        "api_key": plain_key,  # ONLY returned once!
+        "key_id": result.data[0]['id'] if result.data else None,
+        "name": name,
+        "warning": "Save this key securely. It cannot be retrieved again."
+    }
+
+
+@router.post("/integration/revoke-key/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    current_user: dict = Depends(get_current_admin)
+):
+    """Admin-only: Revoke an integration API key."""
+    client = get_supabase()
+    client.table('api_keys').update({
+        'status': 'revoked'
+    }).eq('id', key_id).execute()
+
+    return {"success": True, "message": f"Key {key_id} revoked"}

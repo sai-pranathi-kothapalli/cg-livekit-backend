@@ -395,3 +395,80 @@ class BookingService:
             "consistent": True,
             "count": recorded_count,
         }
+
+    async def create_integration_booking(
+        self,
+        external_student_id: str,
+        batch: str,
+        slot_id: str,
+        user_service=None
+    ) -> dict:
+        """
+        Create a booking from LMS integration.
+        
+        Differs from student-initiated booking:
+        - Uses external_student_id (resolved to internal user)
+        - No JWT required (API key auth handles security)
+        - Returns interview_link (full URL, not just token)
+        
+        Returns: { success, student_id, batch, slot_id, interview_link, booking_token }
+        """
+        import os
+        
+        # Resolve external student ID to internal user
+        if user_service is None:
+            raise Exception("user_service is required for integration booking")
+
+        student = user_service.resolve_external_student_id(external_student_id)
+        if not student:
+            raise ValueError(f"Student with external_id {external_student_id} not found. Enroll them first.")
+
+        internal_user_id = student.get('id')
+        email = student.get('email', '')
+        name = student.get('name', '')
+
+        # Fetch the slot to get curriculum_topics and validate
+        try:
+            slot_result = self.client.table('slots').select('*').eq(
+                'id', slot_id
+            ).limit(1).execute()
+
+            if not slot_result.data:
+                raise ValueError(f"Slot {slot_id} not found")
+
+            slot_data = slot_result.data[0]
+        except ValueError:
+            raise
+        except Exception as e:
+            raise Exception(f"Failed to fetch slot: {str(e)}")
+
+        # Use the existing create_booking method for the actual booking
+        # (this handles atomic slot increment, compensation, duplicate checks)
+        booking = self.create_booking(
+            user_id=internal_user_id,
+            email=email,
+            slot_id=slot_id,
+            name=name,
+        )
+
+        # Update the booking with batch info
+        try:
+            self.client.table('interview_bookings').update({
+                'batch': batch,
+            }).eq('token', booking).execute() 
+        except Exception:
+            pass  # Non-critical — batch is for analytics only
+
+        # Construct the interview link
+        base_url = os.getenv('INTEGRATION_URL_BASE', 'https://interview.platform.com')
+        booking_token = booking # create_booking returns a string token
+        interview_link = f"{base_url}/interview/{booking_token}"
+
+        return {
+            "success": True,
+            "student_id": external_student_id,
+            "batch": batch,
+            "slot_id": slot_id,
+            "interview_link": interview_link,
+            "booking_token": booking_token,
+        }

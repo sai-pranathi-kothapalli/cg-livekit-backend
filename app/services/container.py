@@ -11,6 +11,9 @@ from app.services.assignment_service import AssignmentService
 from app.services.transcript_storage_service import TranscriptStorageService
 from app.services.evaluation_service import EvaluationService
 from app.services.otp_service import OTPService
+from app.db.supabase import get_supabase
+from app.utils.integration_auth import IntegrationAuth
+from app.services.webhook_service import WebhookService
 
 config = get_config()
 
@@ -27,3 +30,5 @@ assignment_service = AssignmentService(config)
 transcript_storage_service = TranscriptStorageService(config)
 evaluation_service = EvaluationService(config)
 otp_service = OTPService(config)
+integration_auth = IntegrationAuth(get_supabase())
+webhook_service = WebhookService(get_supabase())

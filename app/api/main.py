@@ -157,6 +157,7 @@ from app.api.users import router as users_router
 from app.api.resume import router as resume_router
 from app.api.student import router as student_router
 from app.api.compiler import router as compiler_router
+from app.api.integration import router as integration_router
 
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["Admin"])
@@ -167,6 +168,7 @@ app.include_router(users_router, prefix="/api/users", tags=["Users"])
 app.include_router(resume_router, prefix="/api/resume", tags=["Resume"])
 app.include_router(student_router, prefix="/api/student", tags=["Student"])
 app.include_router(compiler_router, prefix="/api/compiler", tags=["Compiler"])
+app.include_router(integration_router, prefix="/api/integration", tags=["Integration"])
 
 
 @app.on_event("startup")

@@ -115,3 +115,93 @@ class UserService:
         except Exception as e:
             logger.error(f"Error deleting user: {e}")
             return False
+
+    async def enroll_integration_students(self, batch: str, location: str, students: list) -> dict:
+        """
+        Bulk enroll students from LMS integration.
+        
+        Each student has: { student_id (external UUID), email, name, batch, location }
+        
+        Returns: { created: [ids], already_existed: [ids], failed: [{ student_id, error }] }
+        
+        Uses external_student_id for deduplication — if a student with this external ID
+        already exists, skip them (don't create duplicate).
+        """
+        results = {
+            "created": [],
+            "already_existed": [],
+            "failed": []
+        }
+
+        for student in students:
+            external_id = student.get("student_id")
+            email = student.get("email", "").strip().lower()
+            name = student.get("name", "")
+
+            try:
+                # Check if student already exists by external_student_id
+                existing = self.client.table('enrolled_users').select('id, external_student_id').eq(
+                    'external_student_id', external_id
+                ).execute()
+
+                if existing.data and len(existing.data) > 0:
+                    results["already_existed"].append(external_id)
+                    continue
+
+                # Also check by email (student may exist from standalone platform usage)
+                existing_by_email = self.client.table('enrolled_users').select('id, external_student_id').eq(
+                    'email', email
+                ).execute()
+
+                if existing_by_email.data and len(existing_by_email.data) > 0:
+                    # Student exists by email but doesn't have external_student_id
+                    # Link them by updating the external_student_id
+                    self.client.table('enrolled_users').update({
+                        'external_student_id': external_id,
+                        'batch': batch,
+                        'location': location,
+                    }).eq('email', email).execute()
+
+                    results["already_existed"].append(external_id)
+                    continue
+
+                # Create new student
+                insert_data = {
+                    'external_student_id': external_id,
+                    'email': email,
+                    'name': name,
+                    'batch': batch,
+                    'location': location,
+                    'status': 'enrolled',
+                }
+
+                result = self.client.table('enrolled_users').insert(insert_data).execute()
+
+                if result.data and len(result.data) > 0:
+                    results["created"].append(external_id)
+                else:
+                    results["failed"].append({
+                        "student_id": external_id,
+                        "error": "Insert returned no data"
+                    })
+
+            except Exception as e:
+                results["failed"].append({
+                    "student_id": external_id,
+                    "error": str(e)
+                })
+
+        return results
+
+    def resolve_external_student_id(self, external_student_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Given an LMS external_student_id, find our internal user record.
+        Returns the full enrolled_user record or None.
+        """
+        try:
+            result = self.client.table('enrolled_users').select('*').eq(
+                'external_student_id', external_student_id
+            ).limit(1).execute()
+            return result.data[0] if result.data else None
+        except Exception:
+            return None

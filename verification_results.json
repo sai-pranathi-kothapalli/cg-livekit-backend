@@ -1,0 +1,30 @@
+{
+  "api_key": {
+    "plain_key": "cgn_live_lms_42c924d77ff184e6bd6ad649c7a8b6ad3c17b26d738d2e75",
+    "hashed_key": "8e798bb8d5470b69d1a2a38820785aacff921fecba75b6d0598e8ae834090494",
+    "inserted": true,
+    "id": "c10ab947-804e-46f3-b8f7-e8e2b82fddb2"
+  },
+  "verification": {
+    "enrolled_users": [
+      true,
+      "Found"
+    ],
+    "slots": [
+      true,
+      "Found"
+    ],
+    "interview_bookings": [
+      true,
+      "Found"
+    ],
+    "webhooks_registry": [
+      true,
+      "Found"
+    ],
+    "webhook_delivery_log": [
+      true,
+      "Found"
+    ]
+  }
+}

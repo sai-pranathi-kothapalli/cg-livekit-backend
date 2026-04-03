@@ -340,3 +340,108 @@ class SlotService:
         except Exception as e:
             logger.error(f"Error atomically decrementing booking count for {slot_id}: {e}")
             raise Exception(f"Failed to release slot {slot_id}: {str(e)}")
+
+    async def create_window_slots(
+        self,
+        batch: str,
+        location: str,
+        date: str,
+        window_start: str,
+        window_end: str,
+        interview_duration: int,
+        curriculum_topics: str = None,
+        capacity: int = 30,
+        created_by: str = "integration"
+    ) -> list:
+        """
+        Create interview slots across a time window for a batch.
+        
+        Args:
+            batch: "PFS-106"
+            location: "vijayawada"
+            date: "2026-04-07"
+            window_start: "08:00"
+            window_end: "20:00"
+            interview_duration: 30 (minutes)
+            curriculum_topics: "Python: loops, functions; MySQL: joins"
+            capacity: max students per slot
+        
+        Returns: list of created slot records
+        """
+        from datetime import datetime, timedelta
+        
+        # Parse start and end times
+        start_dt = datetime.strptime(f"{date} {window_start}", "%Y-%m-%d %H:%M")
+        end_dt = datetime.strptime(f"{date} {window_end}", "%Y-%m-%d %H:%M")
+
+        if end_dt <= start_dt:
+            raise ValueError("window_end must be after window_start")
+
+        if interview_duration <= 0 or interview_duration > 120:
+            raise ValueError("interview_duration must be between 1 and 120 minutes")
+
+        # Calculate how many slots fit in the window
+        total_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        slot_count = total_minutes // interview_duration
+
+        if slot_count == 0:
+            raise ValueError("Time window too short for the given interview duration")
+
+        # Generate slot data
+        slots_to_create = []
+        current_time = start_dt
+
+        import uuid
+        from app.utils.datetime_utils import get_now_ist
+        now_iso = get_now_ist().isoformat()
+
+        for i in range(slot_count):
+            slot_end = current_time + timedelta(minutes=interview_duration)
+
+            # Note: We simulate start_time and end_time for the frontend formatting, but we don't save them.
+            slots_to_create.append({
+                'id': str(uuid.uuid4()),
+                'slot_datetime': current_time.isoformat(),
+                'duration_minutes': interview_duration,
+                'capacity': capacity,
+                'booked_count': 0,
+                'status': 'active',
+                'batch': batch,
+                'location': location,
+                'curriculum_topics': curriculum_topics,
+                'created_by': created_by,
+                'created_at': now_iso,
+                'updated_at': now_iso,
+            })
+
+            current_time = slot_end
+
+        # Bulk insert all slots
+        result = self.client.table('slots').insert(slots_to_create).execute()
+
+        if not result.data:
+            raise Exception("Failed to create slots — insert returned no data")
+
+        return [self._map_to_frontend(s) for s in result.data]
+
+    def get_slots_by_batch(self, batch: str) -> list:
+        """
+        Get all slots for a specific batch with current availability.
+        Returns slots sorted by time.
+        """
+        result = self.client.table('slots').select(
+            'id, slot_datetime, duration_minutes, capacity, booked_count, status, curriculum_topics'
+        ).eq(
+            'batch', batch
+        ).order(
+            'slot_datetime', desc=False
+        ).execute()
+
+        # Add computed 'available' count for each slot
+        slots = []
+        for slot in (result.data or []):
+            slot['available'] = max(0, slot.get('capacity', 0) - slot.get('booked_count', 0))
+            # compute start_time and end_time for the API
+            slots.append(self._map_to_frontend(slot))
+
+        return slots
