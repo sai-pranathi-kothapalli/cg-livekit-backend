@@ -4,7 +4,6 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     ChangePasswordRequest,
-    ResetPasswordRequest,
     StudentRegisterRequest,
     AdminLoginRequest,
     AdminLoginResponse
