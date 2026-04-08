@@ -14,6 +14,8 @@ class CreateSlotRequest(BaseModel):
     slot_datetime: str = Field(..., example="2026-02-15T10:00:00+05:30")  # ISO format datetime string
     max_capacity: int = Field(default=30, example=10)  # Default 30, but admin can change
     duration_minutes: int = Field(default=30, example=60)  # Interview duration in minutes (default 30)
+    batch: Optional[str] = Field(None, example="PFS-106")
+    location: Optional[str] = Field(None, example="vijayawada")
     notes: Optional[str] = Field(None, example="Morning interview slot")
 
     @field_validator('notes')
@@ -28,6 +30,8 @@ class UpdateSlotRequest(BaseModel):
     slot_datetime: Optional[str] = Field(None, example="2026-02-15T11:00:00+05:30")
     max_capacity: Optional[int] = Field(None, example=20)
     status: Optional[str] = Field(None, example="cancelled")
+    batch: Optional[str] = Field(None, example="PFS-107")
+    location: Optional[str] = Field(None, example="nellore")
     notes: Optional[str] = Field(None, example="Rescheduled due to availability")
 
     @field_validator('notes')
@@ -47,6 +51,8 @@ class SlotResponse(BaseModel):
     max_capacity: int
     current_bookings: int
     status: str
+    batch: Optional[str] = None
+    location: Optional[str] = None
     notes: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None  # Optional for MongoDB docs that may not have it
@@ -60,6 +66,8 @@ class CreateDaySlotsRequest(BaseModel):
     interval_minutes: int = Field(default=30, example=60)
     duration_minutes: int = Field(default=30, example=45)
     max_capacity: int = Field(default=30, example=5)
+    batch: Optional[str] = Field(None, example="PFS-106")
+    location: Optional[str] = Field(None, example="vijayawada")
     notes: Optional[str] = Field(None, example="Back-to-back testing slots")
 
 

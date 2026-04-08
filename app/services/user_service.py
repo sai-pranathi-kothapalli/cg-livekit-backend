@@ -205,3 +205,22 @@ class UserService:
             return result.data[0] if result.data else None
         except Exception:
             return None
+
+    def get_students_by_batch(self, batch: str) -> list:
+        """
+        Get all enrolled students for a specific batch.
+        Returns list of students with external_student_id, email, name, batch, location.
+        """
+        try:
+            result = self.client.table('enrolled_users').select(
+                'external_student_id, email, name, batch, location, status, created_at'
+            ).eq(
+                'batch', batch
+            ).order(
+                'name', desc=False
+            ).execute()
+
+            return result.data or []
+
+        except Exception as e:
+            raise Exception(f"Failed to fetch students for batch {batch}: {str(e)}")

@@ -110,16 +110,23 @@ def sanitize_phone(phone: str) -> str:
 
 
 def sanitize_uuid(value: str) -> str:
-    """Validate and sanitize a UUID string."""
+    """Validate and sanitize a UUID or LMS booking token."""
     if not isinstance(value, str):
-        raise ValueError("UUID must be a string")
+        raise ValueError("Token must be a string")
         
-    value = value.strip().lower()
+    value = value.strip()
 
-    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', value):
-        raise ValueError(f"Invalid UUID format: {value}")
+    # Standard UUID regex (hyphenated hex)
+    uuid_pattern = r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    # LMS Booking Token regex (32-char alphanumeric)
+    lms_token_pattern = r'^[a-zA-Z0-9]{32}$'
 
-    return value
+    if re.match(uuid_pattern, value):
+        return value.lower()
+    elif re.match(lms_token_pattern, value):
+        return value
+    else:
+        raise ValueError(f"Invalid token format: {value}")
 
 
 def sanitize_for_llm(text: str, max_length: int = 20000) -> str:

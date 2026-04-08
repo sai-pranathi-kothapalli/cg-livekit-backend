@@ -88,6 +88,8 @@ class SlotService:
         max_bookings: int = 1,
         notes: Optional[str] = None,
         duration_minutes: Optional[int] = None,
+        batch: Optional[str] = None,
+        location: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
             start_time_ist = to_ist(start_time)
@@ -106,6 +108,8 @@ class SlotService:
                 "capacity": max_bookings,     # DB column: capacity
                 "booked_count": 0,            # DB column: booked_count
                 "status": "active",
+                "batch": batch,
+                "location": location,
                 "notes": notes,
                 "created_at": now_iso,
                 "updated_at": now_iso,
@@ -124,7 +128,9 @@ class SlotService:
     def get_slot_by_datetime(self, slot_datetime_iso: str) -> Optional[Dict[str, Any]]:
         """Return an existing slot with the same slot_datetime (avoid duplicates)."""
         try:
-            response = self.client.table("slots").select("*").eq("slot_datetime", slot_datetime_iso).execute()
+            # Canonicalize input for comparison
+            dt = parse_datetime_safe(slot_datetime_iso)
+            response = self.client.table("slots").select("*").eq("slot_datetime", dt.isoformat()).execute()
             if not response.data:
                 return None
             return self._map_to_frontend(response.data[0])
@@ -180,6 +186,7 @@ class SlotService:
             if "current_bookings" in updates:
                 updates["booked_count"] = updates.pop("current_bookings")
             
+            # Map batch/location if present (they are already DB keys but for clarity)
             # Remove keys not in schema
             for key in ["start_time", "end_time", "max_bookings", "current_bookings", "max_capacity"]:
                 if key in updates:
@@ -231,6 +238,8 @@ class SlotService:
         interval_minutes: int,
         max_capacity: int = 1,
         notes: Optional[str] = None,
+        batch: Optional[str] = None,
+        location: Optional[str] = None,
     ) -> tuple[List[Dict[str, Any]], List[str]]:
         """Generate multiple slots for a specific day."""
         from datetime import time, timedelta
@@ -252,7 +261,9 @@ class SlotService:
                     end_time=next_slot_time,
                     max_bookings=max_capacity,
                     notes=notes,
-                    duration_minutes=interval_minutes
+                    duration_minutes=interval_minutes,
+                    batch=batch,
+                    location=location
                 )
                 created_slots.append(slot)
             except Exception as e:
@@ -351,7 +362,8 @@ class SlotService:
         interview_duration: int,
         curriculum_topics: str = None,
         capacity: int = 30,
-        created_by: str = "integration"
+        student_id: str = None,
+        created_by: str = None
     ) -> list:
         """
         Create interview slots across a time window for a batch.
@@ -370,9 +382,10 @@ class SlotService:
         """
         from datetime import datetime, timedelta
         
-        # Parse start and end times
-        start_dt = datetime.strptime(f"{date} {window_start}", "%Y-%m-%d %H:%M")
-        end_dt = datetime.strptime(f"{date} {window_end}", "%Y-%m-%d %H:%M")
+        # Parse start and end times - Localize to IST immediately
+        from app.utils.datetime_utils import to_ist
+        start_dt = to_ist(datetime.strptime(f"{date} {window_start}", "%Y-%m-%d %H:%M"))
+        end_dt = to_ist(datetime.strptime(f"{date} {window_end}", "%Y-%m-%d %H:%M"))
 
         if end_dt <= start_dt:
             raise ValueError("window_end must be after window_start")
@@ -395,13 +408,33 @@ class SlotService:
         from app.utils.datetime_utils import get_now_ist
         now_iso = get_now_ist().isoformat()
 
+        # Fetch existing slots for this batch and date to minimize DB calls
+        existing_res = self.client.table('slots').select('*').eq('batch', batch).gte('slot_datetime', start_dt.isoformat()).lte('slot_datetime', end_dt.isoformat()).execute()
+        
+        # Canonicalize keys (parse and refreeze ISO) to ensure match (e.g. +05:30 vs +0530)
+        existing_slots_map = {}
+        for s in (existing_res.data or []):
+            try:
+                dt = parse_datetime_safe(s['slot_datetime'])
+                existing_slots_map[dt.isoformat()] = s
+            except:
+                existing_slots_map[s['slot_datetime']] = s
+
         for i in range(slot_count):
+            slot_iso = current_time.isoformat()
             slot_end = current_time + timedelta(minutes=interview_duration)
+
+            if slot_iso in existing_slots_map:
+                # Slot already exists, skip creation and use existing
+                logger.info(f"[SlotService] Slot already exists for batch {batch} at {slot_iso}, skipping.")
+                # Update map with existing slots we found
+                current_time = slot_end
+                continue
 
             # Note: We simulate start_time and end_time for the frontend formatting, but we don't save them.
             slots_to_create.append({
                 'id': str(uuid.uuid4()),
-                'slot_datetime': current_time.isoformat(),
+                'slot_datetime': slot_iso,
                 'duration_minutes': interview_duration,
                 'capacity': capacity,
                 'booked_count': 0,
@@ -409,20 +442,26 @@ class SlotService:
                 'batch': batch,
                 'location': location,
                 'curriculum_topics': curriculum_topics,
-                'created_by': created_by,
+                'student_id': student_id,
+                'created_by': created_by, # Now as UUID or None
                 'created_at': now_iso,
                 'updated_at': now_iso,
             })
 
             current_time = slot_end
 
-        # Bulk insert all slots
-        result = self.client.table('slots').insert(slots_to_create).execute()
+        # Bulk insert only the NEW slots
+        if slots_to_create:
+            result = self.client.table('slots').insert(slots_to_create).execute()
+            if not result.data:
+                raise Exception("Failed to create slots — insert returned no data")
+            new_created = [self._map_to_frontend(s) for s in result.data]
+        else:
+            new_created = []
 
-        if not result.data:
-            raise Exception("Failed to create slots — insert returned no data")
-
-        return [self._map_to_frontend(s) for s in result.data]
+        # Return all slots in window (both existing and newly created)
+        final_res = self.client.table('slots').select('*').eq('batch', batch).gte('slot_datetime', start_dt.isoformat()).lte('slot_datetime', end_dt.isoformat()).order('slot_datetime').execute()
+        return [self._map_to_frontend(s) for s in (final_res.data or [])]
 
     def get_slots_by_batch(self, batch: str) -> list:
         """

@@ -73,3 +73,11 @@
 | POST | /api/interviews/analyze-code | Interacts with deep-interview AI models for interactive compiler bounds checking |
 | GET | /api/interviews/api/student/analytics | General statistical dashboard logic per individual evaluation array |
 | GET | /api/interviews/evaluation/{token} | Secure evaluation report data return bound by Token string (Secured effectively) |
+| GET | /api/integration/health | Health check for integration (API Key Auth) |
+| POST | /api/integration/enroll-students | Bulk enroll students for a batch |
+| GET | /api/integration/students | Get all enrolled students for a batch |
+| POST | /api/integration/schedule-interview | Create multiple interview slots for a batch. Accepts optional `student_ids` (array) for enrollment validation. |
+| GET | /api/integration/slots | List available slots for a batch |
+| POST | /api/integration/book-slot | Book a slot for an enrolled student |
+| POST | /api/integration/register-webhook | Register an LMS callback URL |
+| GET | /api/integration/evaluation/{token} | Fetch results for an LMS-booked interview |

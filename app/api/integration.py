@@ -57,14 +57,16 @@ class EnrollStudentsRequest(BaseModel):
 class ScheduleInterviewRequest(BaseModel):
     batch: str
     location: str
+    student_ids: Optional[List[str]] = None  # Array of external student UUIDs
     date: str  # "2026-04-07"
     window_start: str  # "08:00"
     window_end: str  # "20:00"
     interview_duration: int  # minutes
     curriculum_topics: Optional[str] = None
     capacity: Optional[int] = 30
+    student_id: Optional[str] = None
 
-    @field_validator('batch', 'location')
+    @field_validator('batch', 'location', 'student_id')
     @classmethod
     def clean_text(cls, v):
         return sanitize_string(v, max_length=255)
@@ -92,7 +94,7 @@ class ScheduleInterviewRequest(BaseModel):
 
 
 class BookSlotRequest(BaseModel):
-    student_id: str  # External UUID from LMS
+    external_student_id: str  # External UUID from LMS
     batch: str
     slot_id: str  # UUID of the slot to book
 
@@ -100,6 +102,17 @@ class BookSlotRequest(BaseModel):
     @classmethod
     def clean_batch(cls, v):
         return sanitize_string(v, max_length=255)
+
+
+class BookSlotResponse(BaseModel):
+    slotId: str
+    bookingToken: str
+    interviewLink: str
+    scheduledAt: Optional[str]
+    slotTime: Optional[str]
+    endTime: Optional[str]
+    date: Optional[str]
+    durationMinutes: Optional[int]
 
 
 class RegisterWebhookRequest(BaseModel):
@@ -154,6 +167,44 @@ async def enroll_students(
         raise HTTPException(status_code=500, detail=f"Enrollment failed: {str(e)}")
 
 
+@router.get("/students")
+async def get_students_by_batch(
+    batch: str = Query(..., description="Batch code, e.g. PFS-106"),
+    api_key_info: dict = Depends(integration_auth.verify_key)
+):
+    """
+    Get all enrolled students for a batch.
+    LMS uses this to verify enrollment sync and cross-check student lists.
+    """
+    try:
+        from app.utils.sanitize import sanitize_string
+        batch = sanitize_string(batch, max_length=255)
+
+        students = user_service.get_students_by_batch(batch)
+
+        formatted = []
+        for s in students:
+            formatted.append({
+                "student_id": s.get("external_student_id"),
+                "email": s.get("email"),
+                "name": s.get("name"),
+                "batch": s.get("batch"),
+                "location": s.get("location"),
+                "status": s.get("status"),
+                "enrolled_at": s.get("created_at"),
+            })
+
+        return {
+            "success": True,
+            "batch": batch,
+            "total": len(formatted),
+            "students": formatted,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch students: {str(e)}")
+
+
 @router.post("/schedule-interview")
 async def schedule_interview(
     request: ScheduleInterviewRequest,
@@ -162,7 +213,35 @@ async def schedule_interview(
     """
     Create interview slots for a batch within a time window.
     Generates 30-min slots from window_start to window_end.
+    If student_ids provided, validate all are enrolled.
     """
+    # If student_ids provided, validate all are enrolled
+    enrollment_check = None
+    if request.student_ids and len(request.student_ids) > 0:
+        enrolled = []
+        not_enrolled = []
+
+        for sid in request.student_ids:
+            student = user_service.resolve_external_student_id(sid)
+            if student:
+                enrolled.append(sid)
+            else:
+                not_enrolled.append(sid)
+
+        enrollment_check = {
+            "total_students": len(request.student_ids),
+            "enrolled": len(enrolled),
+            "not_enrolled": not_enrolled,
+        }
+
+        # If any students aren't enrolled, warn but don't block
+        if not_enrolled:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Schedule interview for {request.batch}: "
+                f"{len(not_enrolled)} student(s) not enrolled: {not_enrolled[:5]}"
+            )
+
     try:
         slots = await slot_service.create_window_slots(
             batch=request.batch,
@@ -173,6 +252,8 @@ async def schedule_interview(
             interview_duration=request.interview_duration,
             curriculum_topics=request.curriculum_topics,
             capacity=request.capacity or 30,
+            student_id=request.student_id,
+            created_by=api_key_info.get("id"),
         )
 
         # Format response to match what LMS expects
@@ -187,13 +268,19 @@ async def schedule_interview(
                 "booked": slot.get("booked_count", 0),
             })
 
-        return {
+        response = {
             "success": True,
             "batch": request.batch,
             "date": request.date,
             "total_slots": len(formatted_slots),
             "slots": formatted_slots,
         }
+
+        # Include enrollment check if student_ids were provided
+        if enrollment_check:
+            response["student_validation"] = enrollment_check
+
+        return response
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -239,7 +326,7 @@ async def get_slots_by_batch(
         raise HTTPException(status_code=500, detail=f"Failed to fetch slots: {str(e)}")
 
 
-@router.post("/book-slot")
+@router.post("/book-slot", response_model=BookSlotResponse)
 async def book_slot(
     request: BookSlotRequest,
     api_key_info: dict = Depends(integration_auth.verify_key)
@@ -252,13 +339,13 @@ async def book_slot(
     """
     try:
         result = await booking_service.create_integration_booking(
-            external_student_id=request.student_id,
+            external_student_id=request.external_student_id,
             batch=request.batch,
             slot_id=request.slot_id,
             user_service=user_service,
         )
 
-        return result
+        return result.get("data", result)
 
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -335,3 +422,46 @@ async def register_webhook(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Webhook registration failed: {str(e)}")
+
+
+@router.get("/evaluation-by-student")
+async def get_evaluation_by_student(
+    student_id: str = Query(..., description="External student ID from LMS"),
+    batch: str = Query(..., description="Batch code"),
+    api_key_info: dict = Depends(integration_auth.verify_key)
+):
+    """
+    Get evaluation results for a student in a specific batch.
+    Uses the new student_id and batch columns in the evaluations table for direct lookup.
+    """
+    try:
+        from app.db.supabase import get_supabase
+        supabase = get_supabase()
+        
+        # Search directly in evaluations table using the new columns
+        res = supabase.table("evaluations").select("booking_token").eq("student_id", student_id).eq("batch", batch).order("created_at", desc=True).limit(1).execute()
+        
+        if not res.data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No interview result found for student '{student_id}' in batch '{batch}'. "
+                       f"The interview may not have been completed yet."
+            )
+            
+        booking_token = res.data[0].get("booking_token")
+        
+        # Use service to get enriched evaluation context
+        evaluation = evaluation_service.get_evaluation_with_context(booking_token)
+        
+        if not evaluation:
+            raise HTTPException(status_code=404, detail="Evaluation details missing for found record")
+
+        return {
+            "success": True,
+            **evaluation,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to search evaluation: {str(e)}")

@@ -405,17 +405,21 @@ class BookingService:
     ) -> dict:
         """
         Create a booking from LMS integration.
-        
+
         Differs from student-initiated booking:
-        - Uses external_student_id (resolved to internal user)
+        - Uses external_student_id (resolved to enrolled_users entry)
+        - Sets enrolled_user_id — does NOT touch user_id (avoids users FK)
+        - user_id is NULL for integration bookings
         - No JWT required (API key auth handles security)
         - Returns interview_link (full URL, not just token)
-        
+
         Returns: { success, student_id, batch, slot_id, interview_link, booking_token }
         """
         import os
+        import random
+        import string
         
-        # Resolve external student ID to internal user
+        # Resolve external student ID to enrolled_users record
         if user_service is None:
             raise Exception("user_service is required for integration booking")
 
@@ -423,7 +427,7 @@ class BookingService:
         if not student:
             raise ValueError(f"Student with external_id {external_student_id} not found. Enroll them first.")
 
-        internal_user_id = student.get('id')
+        enrolled_user_id = student.get('id')   # enrolled_users.id — NOT users.id
         email = student.get('email', '')
         name = student.get('name', '')
 
@@ -442,33 +446,79 @@ class BookingService:
         except Exception as e:
             raise Exception(f"Failed to fetch slot: {str(e)}")
 
-        # Use the existing create_booking method for the actual booking
-        # (this handles atomic slot increment, compensation, duplicate checks)
-        booking = self.create_booking(
-            user_id=internal_user_id,
-            email=email,
-            slot_id=slot_id,
-            name=name,
-        )
-
-        # Update the booking with batch info
+        # Atomically reserve the slot
         try:
-            self.client.table('interview_bookings').update({
-                'batch': batch,
-            }).eq('token', booking).execute() 
-        except Exception:
-            pass  # Non-critical — batch is for analytics only
+            updated_slot = self.slot_service.increment_booking_count(slot_id)
+            logger.info(f"Slot {slot_id} reserved for enrolled_user {enrolled_user_id}. Count: {updated_slot.get('booked_count')}")
+        except ValueError as e:
+            raise ValueError(str(e))
+        except Exception as e:
+            raise Exception(f"Failed to reserve slot: {str(e)}")
+
+        # Generate token and insert booking row directly
+        # user_id = NULL (no entry in users table for integration students)
+        # enrolled_user_id = enrolled_users.id
+        from app.utils.datetime_utils import parse_datetime_safe
+        token = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+        scheduled_at = parse_datetime_safe(slot_data.get('slot_datetime'))
+
+        try:
+            booking_data = {
+                "id": str(uuid.uuid4()),
+                "token": token,
+                "name": name,
+                "email": email,
+                "scheduled_at": scheduled_at.isoformat(),
+                "slot_id": slot_id,
+                "user_id": None,
+                "enrolled_user_id": enrolled_user_id,
+                "batch": batch,
+                "status": "scheduled",
+                "created_at": get_now_ist().isoformat(),
+            }
+            result = self.client.table("interview_bookings").insert(booking_data).execute()
+
+            if not result.data:
+                raise Exception("Booking insert returned empty result")
+
+            logger.info(f"[IntegrationBooking] Created: token={token}, enrolled_user={enrolled_user_id}, slot={slot_id}")
+
+        except Exception as e:
+            # Compensate: release the slot reservation
+            logger.error(f"Booking creation failed, compensating slot release: {str(e)}")
+            try:
+                self.slot_service.decrement_booking_count(slot_id)
+            except Exception as comp_err:
+                logger.critical(f"COMPENSATION FAILED for slot {slot_id}: {comp_err}")
+            raise Exception(f"Failed to create integration booking: {str(e)}")
 
         # Construct the interview link
-        base_url = os.getenv('INTEGRATION_URL_BASE', 'https://interview.platform.com')
-        booking_token = booking # create_booking returns a string token
-        interview_link = f"{base_url}/interview/{booking_token}"
-
+        base_url = os.getenv('INTEGRATION_URL_BASE', 'http://localhost:3000')
+        interview_link = f"{base_url}/interview/{token}"
+        
+        # Extract slot timing info for response
+        slot_datetime = slot_data.get('slot_datetime')
+        duration_minutes = slot_data.get('duration_minutes')
+        
+        # Calculate end time from start + duration
+        slot_end_datetime = None
+        if slot_datetime and duration_minutes:
+            from datetime import datetime, timedelta
+            start = datetime.fromisoformat(slot_datetime.replace('Z', '+00:00'))
+            end = start + timedelta(minutes=duration_minutes)
+            slot_end_datetime = end.isoformat()
+        
         return {
             "success": True,
-            "student_id": external_student_id,
-            "batch": batch,
-            "slot_id": slot_id,
-            "interview_link": interview_link,
-            "booking_token": booking_token,
+            "data": {
+                "slotId": slot_id,
+                "bookingToken": token,
+                "interviewLink": interview_link,
+                "scheduledAt": slot_datetime,
+                "slotTime": slot_datetime,
+                "endTime": slot_end_datetime,
+                "date": slot_datetime[:10] if slot_datetime else None,
+                "durationMinutes": duration_minutes,
+            },
+            "message": "Slot booked successfully"
         }

@@ -57,6 +57,8 @@ class EvaluationService:
         overall_feedback: Optional[str] = None,
         token_usage: Optional[Dict[str, int]] = None,
         parse_status: str = "success",
+        batch: Optional[str] = None,
+        student_id: Optional[str] = None,
     ) -> Optional[str]:
         """
         Create or update an evaluation record.
@@ -107,6 +109,8 @@ class EvaluationService:
                 "areas_for_improvement": areas_for_improvement or [],
                 "interview_state": interview_state,
                 "parse_status": parse_status,
+                "batch": batch,
+                "student_id": student_id,
                 "updated_at": get_now_ist().isoformat(),
             }
             
@@ -135,8 +139,8 @@ class EvaluationService:
                 # Build webhook payload matching what LMS expects
                 webhook_payload = {
                     "booking_token": booking_token,
-                    "student_id": None,  # Will be enriched below
-                    "batch": None,       # Will be enriched below
+                    "student_id": student_id,  # Provided from caller
+                    "batch": batch,            # Provided from caller
                     "overall_score": evaluation_data.get("overall_score"),
                     "technical_knowledge": evaluation_data.get("technical_knowledge"),
                     "communication_quality": evaluation_data.get("communication_quality"),
@@ -146,25 +150,29 @@ class EvaluationService:
                     "completed_at": datetime.utcnow().isoformat(),
                 }
 
-                # Enrich with student_id and batch from booking
-                try:
-                    booking_enrich = self.client.table('interview_bookings').select(
-                        'user_id, batch'
-                    ).eq('token', booking_token).limit(1).execute()
+                # Fallback enrichment if batch/student_id were not passed to this method
+                if not webhook_payload["student_id"] or not webhook_payload["batch"]:
+                    try:
+                        booking_enrich = self.client.table('interview_bookings').select(
+                            'user_id, enrolled_user_id, batch'
+                        ).eq('token', booking_token).limit(1).execute()
 
-                    if booking_enrich.data:
-                        webhook_payload["batch"] = booking_enrich.data[0].get("batch")
+                        if booking_enrich.data:
+                            if not webhook_payload["batch"]:
+                                webhook_payload["batch"] = booking_enrich.data[0].get("batch")
 
-                        user_id = booking_enrich.data[0].get("user_id")
-                        if user_id:
-                            user_enrich = self.client.table('enrolled_users').select(
-                                'external_student_id'
-                            ).eq('id', user_id).limit(1).execute()
+                            # Integration students use enrolled_user_id; legacy students use user_id
+                            student_ref_id = booking_enrich.data[0].get("enrolled_user_id") or booking_enrich.data[0].get("user_id")
+                            
+                            if student_ref_id and not webhook_payload["student_id"]:
+                                user_enrich = self.client.table('enrolled_users').select(
+                                    'external_student_id'
+                                ).eq('id', student_ref_id).limit(1).execute()
 
-                            if user_enrich.data:
-                                webhook_payload["student_id"] = user_enrich.data[0].get("external_student_id")
-                except Exception:
-                    pass  # Non-critical enrichment
+                                if user_enrich.data:
+                                    webhook_payload["student_id"] = user_enrich.data[0].get("external_student_id")
+                    except Exception as enrich_e:
+                        logger.warning(f"Failed to enrich webhook payload: {enrich_e}")
 
                 # Fire webhook asynchronously (don't block the evaluation save)
                 import asyncio
@@ -934,6 +942,24 @@ Be encouraging but honest.
             logger.info(f"📊 [EVAL] HTTPX available: {HTTPX_AVAILABLE}")
             logger.info(f"📊 [EVAL] Gemini API key set: {bool(self.config.gemini_llm.api_key)}")
             
+            # 0. Resolve batch and student_id from booking once at the start
+            batch = None
+            student_id = None
+            try:
+                booking_res = self.client.table("interview_bookings").select("batch, enrolled_user_id, user_id").eq("token", booking_token).limit(1).execute()
+                if booking_res.data:
+                    booking = booking_res.data[0]
+                    batch = booking.get("batch")
+                    # Support both standard users and integration students
+                    user_ref_id = booking.get("enrolled_user_id") or booking.get("user_id")
+                    if user_ref_id:
+                        user_res = self.client.table("enrolled_users").select("external_student_id").eq("id", user_ref_id).limit(1).execute()
+                        if user_res.data:
+                            student_id = user_res.data[0].get("external_student_id")
+                logger.info(f"📊 [EVAL] Resolved context: student_id={student_id}, batch={batch}")
+            except Exception as e:
+                logger.warning(f"📊 [EVAL] Non-critical: Failed to resolve booking context: {e}")
+
             ai_analysis = None
             transcript_too_short = False
             
@@ -982,6 +1008,8 @@ Be encouraging but honest.
                 coding_score=None,
                 overall_feedback="AI analysis in progress...",
                 token_usage=token_usage,
+                batch=batch,
+                student_id=student_id,
             )
 
             # 3. Aggregate if we have enough incremental evaluations
@@ -1179,6 +1207,8 @@ Be encouraging but honest.
                 overall_feedback=overall_feedback,
                 token_usage=token_usage,
                 parse_status=ai_analysis.get("parse_status", "success") if ai_analysis else ("success" if not transcript_too_short else "failed"),
+                batch=batch,
+                student_id=student_id,
             )
             return evaluation_id
             
@@ -1366,31 +1396,36 @@ Be encouraging but honest.
         except Exception:
             transcript = None
 
-        # Fetch booking → enrolled_user to get external_student_id and batch
-        external_student_id = None
-        batch = None
-        try:
-            booking_result = self.client.table('interview_bookings').select(
-                'user_id, batch'
-            ).eq(
-                'token', booking_token
-            ).limit(1).execute()
+        # Get directly from evaluation record (newly added columns)
+        external_student_id = evaluation.get('student_id')
+        batch = evaluation.get('batch')
 
-            if booking_result.data:
-                batch = booking_result.data[0].get('batch')
-                user_id = booking_result.data[0].get('user_id')
+        # Fallback to joins if columns are empty (for backward compatibility)
+        if not external_student_id or not batch:
+            try:
+                booking_result = self.client.table('interview_bookings').select(
+                    'user_id, enrolled_user_id, batch'
+                ).eq(
+                    'token', booking_token
+                ).limit(1).execute()
 
-                if user_id:
-                    user_result = self.client.table('enrolled_users').select(
-                        'external_student_id'
-                    ).eq(
-                        'id', user_id
-                    ).limit(1).execute()
+                if booking_result.data:
+                    row = booking_result.data[0]
+                    if not batch:
+                        batch = row.get('batch')
+                    
+                    user_ref_id = row.get('enrolled_user_id') or row.get('user_id')
+                    if user_ref_id and not external_student_id:
+                        user_result = self.client.table('enrolled_users').select(
+                            'external_student_id'
+                        ).eq(
+                            'id', user_ref_id
+                        ).limit(1).execute()
 
-                    if user_result.data:
-                        external_student_id = user_result.data[0].get('external_student_id')
-        except Exception:
-            pass  # Non-critical enrichment
+                        if user_result.data:
+                            external_student_id = user_result.data[0].get('external_student_id')
+            except Exception as e:
+                logger.warning(f"Fallback context resolution failed: {e}")
 
         # Build enriched response
         return {

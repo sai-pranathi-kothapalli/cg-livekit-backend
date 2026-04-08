@@ -88,6 +88,8 @@ async def create_slot(
             max_bookings=request.max_capacity,
             notes=request.notes,
             duration_minutes=duration_minutes,
+            batch=request.batch,
+            location=request.location,
         )
 
         logger.info(f"[API] Slot created: id={slot.get('id')}, duration_minutes={slot.get('duration_minutes')}, stored_duration={slot.get('duration_minutes')}")
@@ -198,6 +200,10 @@ async def update_slot(
             updates['status'] = request.status
         if request.notes is not None:
             updates['notes'] = request.notes
+        if request.batch is not None:
+            updates['batch'] = request.batch
+        if request.location is not None:
+            updates['location'] = request.location
 
         slot = slot_service.update_slot(slot_id, updates)
         return SlotResponse(**slot)
@@ -295,6 +301,8 @@ async def create_day_slots(
             interval_minutes=request.interval_minutes,
             max_capacity=request.max_capacity,
             notes=request.notes,
+            batch=request.batch,
+            location=request.location,
         )
 
         return CreateDaySlotsResponse(
