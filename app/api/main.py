@@ -168,7 +168,7 @@ app.include_router(users_router, prefix="/api/users", tags=["Users"])
 app.include_router(resume_router, prefix="/api/resume", tags=["Resume"])
 app.include_router(student_router, prefix="/api/student", tags=["Student"])
 app.include_router(compiler_router, prefix="/api/compiler", tags=["Compiler"])
-app.include_router(integration_router, prefix="/api/integration", tags=["Integration"])
+app.include_router(integration_router, prefix="/api/v1/interview", tags=["Integration"])
 
 
 @app.on_event("startup")
