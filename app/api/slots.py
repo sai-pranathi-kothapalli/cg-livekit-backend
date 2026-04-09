@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["Slots"])
 
 
-@router.post("/api/admin/slots", response_model=SlotResponse)
+@router.post("/admin/slots", response_model=SlotResponse)
 async def create_slot(
     request: CreateSlotRequest,
     current_admin: dict = Depends(get_current_admin)
@@ -109,7 +109,7 @@ async def create_slot(
         )
 
 
-@router.get("/api/admin/slots", response_model=List[SlotResponse])
+@router.get("/admin/slots", response_model=List[SlotResponse])
 async def get_all_slots(
     slot_status: Optional[str] = None,
     include_past: bool = False,
@@ -139,7 +139,7 @@ async def get_all_slots(
         )
 
 
-@router.get("/api/admin/slots/{slot_id}", response_model=SlotResponse)
+@router.get("/admin/slots/{slot_id}", response_model=SlotResponse)
 async def get_slot(
     slot_id: str,
     current_admin: dict = Depends(get_current_admin)
@@ -166,7 +166,7 @@ async def get_slot(
         )
 
 
-@router.put("/api/admin/slots/{slot_id}", response_model=SlotResponse)
+@router.put("/admin/slots/{slot_id}", response_model=SlotResponse)
 async def update_slot(
     slot_id: str,
     request: UpdateSlotRequest,
@@ -219,7 +219,7 @@ async def update_slot(
         )
 
 
-@router.delete("/api/admin/slots/{slot_id}")
+@router.delete("/admin/slots/{slot_id}")
 async def delete_slot(
     slot_id: str,
     current_admin: dict = Depends(get_current_admin)
@@ -241,7 +241,7 @@ async def delete_slot(
         )
 
 
-@router.get("/api/slots/student/available", response_model=List[SlotResponse])
+@router.get("/student/available", response_model=List[SlotResponse])
 async def get_available_slots():
     """
     Get available slots for students (public endpoint, no auth required).
@@ -258,7 +258,7 @@ async def get_available_slots():
         )
 
 
-@router.post("/api/admin/slots/create-day", response_model=CreateDaySlotsResponse)
+@router.post("/admin/slots/create-day", response_model=CreateDaySlotsResponse)
 async def create_day_slots(
     request: CreateDaySlotsRequest,
     current_admin: dict = Depends(get_current_admin)
