@@ -493,8 +493,8 @@ class BookingService:
             raise Exception(f"Failed to create integration booking: {str(e)}")
 
         # Construct the interview link
-        base_url = os.getenv('INTEGRATION_URL_BASE', 'http://localhost:3000')
-        interview_link = f"{base_url}/interview/{token}"
+        base_url = self.config.server.public_frontend_url or self.config.server.frontend_url or os.getenv('INTEGRATION_URL_BASE', 'http://localhost:3000')
+        interview_link = f"{base_url.rstrip('/')}/interview/{token}"
         
         # Extract slot timing info for response
         slot_datetime = slot_data.get('slot_datetime')
