@@ -355,7 +355,8 @@ Provide JSON:
         Raises after max_retries failures.
         """
         last_error = None
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
+        model_to_use = self.config.gemini_llm.evaluation_model or self.config.gemini_llm.model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_to_use}:generateContent"
         
         # Build generation config
         generation_config = {"temperature": 0.1}

@@ -59,7 +59,8 @@ class OpenAIConfig:
 class GeminiConfig:
     """Google Gemini LLM configuration (primary LLM)"""
     api_key: str
-    model: str = "gemini-1.5-flash"
+    model: str = "gemini-2.5-flash"
+    evaluation_model: str = "gemini-1.5-flash"
 
 
 @dataclass
@@ -302,7 +303,8 @@ class Config:
             ),
             gemini_llm=GeminiConfig(
                 api_key=gemini_api_key,
-                model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                evaluation_model=os.getenv("EVALUATION_GEMINI_MODEL", "gemini-1.5-flash"),
             ),
             elevenlabs=ElevenLabsConfig(
                 api_key=os.getenv("ELEVENLABS_TTS_API_KEY") or os.getenv("ELEVEN_API_KEY"),
