@@ -59,7 +59,7 @@ class OpenAIConfig:
 class GeminiConfig:
     """Google Gemini LLM configuration (primary LLM)"""
     api_key: str
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-1.5-flash"
 
 
 @dataclass
@@ -69,8 +69,14 @@ class ElevenLabsConfig:
     voice_id: str = "LQMC3j3fn1LA9ZhI4o8g"  # Default voice
     model: Optional[str] = None  # Optional - custom voice determines model
     tts_enabled: bool = False
+
+
+@dataclass
+class DeepgramConfig:
+    """Deepgram STT configuration"""
+    api_key: Optional[str] = None
+    model: str = "nova-3"
     stt_enabled: bool = False
-    stt_model: str = "eleven_multilingual_v2"
 
 
 @dataclass
@@ -149,6 +155,9 @@ class Config:
     
     # AI Services - TTS fallback (ElevenLabs)
     elevenlabs: ElevenLabsConfig
+    
+    # AI Services - Deepgram STT
+    deepgram: DeepgramConfig
     
     # AI Services - Avatar (LiveAvatar/HeyGen)
     liveavatar: LiveAvatarConfig
@@ -300,8 +309,11 @@ class Config:
                 voice_id=os.getenv("ELEVENLABS_VOICE_ID", "LQMC3j3fn1LA9ZhI4o8g"),
                 model=os.getenv("ELEVENLABS_MODEL"),  # Optional - None if not set
                 tts_enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
-                stt_enabled=os.getenv("ELEVENLABS_STT_ENABLED", "false").lower() == "true",
-                stt_model=os.getenv("ELEVENLABS_STT_MODEL", "eleven_multilingual_v2"),
+            ),
+            deepgram=DeepgramConfig(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                model=os.getenv("DEEPGRAM_STT_MODEL", "nova-3"),
+                stt_enabled=os.getenv("DEEPGRAM_STT_ENABLED", "false").lower() == "true",
             ),
             liveavatar=LiveAvatarConfig(
                 api_key=os.getenv("LIVEAVATAR_API_KEY"),
@@ -347,10 +359,10 @@ class Config:
                 "exclusive. Please disable one in your .env file."
             )
         
-        if config_instance.openai.stt_enabled and config_instance.elevenlabs.stt_enabled:
+        if config_instance.openai.stt_enabled and config_instance.deepgram.stt_enabled:
             raise ValueError(
                 "CRITICAL CONFIGURATION ERROR: Both SELF_HOSTED_STT_ENABLED and "
-                "ELEVENLABS_STT_ENABLED are set to 'true'. These services are mutually "
+                "DEEPGRAM_STT_ENABLED are set to 'true'. These services are mutually "
                 "exclusive. Please disable one in your .env file."
             )
         

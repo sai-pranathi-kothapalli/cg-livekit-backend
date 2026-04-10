@@ -70,7 +70,26 @@ async def get_evaluation(token: str):
 
         # If evaluation is missing OR specifically in "analysis in progress" state,
         # recalculate a full evaluation from the transcript.
-        if transcript and (not evaluation or evaluation.get("overall_feedback") == "AI analysis in progress..."):
+        # [OK] Added: If it's been "in progress" for > 5 minutes, treat as crashed and force refresh
+        should_recalculate = False
+        if transcript:
+            if not evaluation:
+                should_recalculate = True
+            elif evaluation.get("overall_feedback") == "AI analysis in progress...":
+                # Check age of preliminary record
+                updated_at_str = evaluation.get("updated_at") or evaluation.get("created_at")
+                if updated_at_str:
+                    try:
+                        updated_at = parse_datetime_safe(updated_at_str)
+                        if updated_at and (get_now_ist() - updated_at).total_seconds() > 300: # 5 minutes
+                            logger.info(f"[API] Evaluation stuck for >5m ({updated_at_str}), forcing recalculation...")
+                            should_recalculate = True
+                    except Exception:
+                        should_recalculate = True # Fallback to recalculate on parse error
+                else:
+                    should_recalculate = True
+
+        if should_recalculate:
             logger.info(f"[API] Evaluation missing or pending for {token}, recalculating from transcript...")
 
             

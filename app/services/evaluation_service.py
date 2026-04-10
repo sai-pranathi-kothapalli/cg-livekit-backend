@@ -1048,7 +1048,7 @@ Be encouraging but honest.
                 logger.info("🚀 [EVAL] Sufficient transcript but no incremental evals (or < 3). Starting FULL AI analysis...")
                 logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
                 try:
-                    # Run async analysis
+                    # Run async analysis with a specific try/except to ensure we don't crash the whole method
                     try:
                         logger.info("🔄 [EVAL-DEBUG] Getting event loop...")
                         loop = asyncio.get_event_loop()
@@ -1082,14 +1082,19 @@ Be encouraging but honest.
                                 self._analyze_with_gemini(transcript, interview_state)
                             )
                             logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
-                    except RuntimeError as re:
-                        logger.info(f"🔄 [EVAL-DEBUG] RuntimeError: {re}, using asyncio.run...")
-                        ai_analysis = asyncio.run(
-                            self._analyze_with_gemini(transcript, interview_state)
-                        )
-                        logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
+                    except (RuntimeError, asyncio.TimeoutError, Exception) as inner_e:
+                        logger.warning(f"🔄 [EVAL-DEBUG] Inner analysis error: {inner_e}")
+                        # If loop is broken or timeout, try one last ditch effort with asyncio.run
+                        try:
+                            ai_analysis = asyncio.run(
+                                self._analyze_with_gemini(transcript, interview_state)
+                            )
+                        except Exception as last_e:
+                            logger.error(f"❌ [EVAL-DEBUG] All AI analysis methods failed: {last_e}")
+                            ai_analysis = None
                 except Exception as e:
-                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
+                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed completely: {e}, using fallback", exc_info=True)
+                    ai_analysis = None
             elif transcript and len(transcript) < min_for_ai:
                 transcript_too_short = True  # Mark as short transcript scenario
                 logger.info(
