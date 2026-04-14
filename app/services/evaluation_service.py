@@ -919,7 +919,7 @@ Be encouraging but honest.
             logger.warning(f"Overall analysis failed: {e}")
             return None
     
-    def calculate_evaluation_from_transcript(
+    async def calculate_evaluation_from_transcript(
         self,
         booking_token: str,
         room_name: str,
@@ -1048,47 +1048,12 @@ Be encouraging but honest.
                 logger.info("🚀 [EVAL] Sufficient transcript but no incremental evals (or < 3). Starting FULL AI analysis...")
                 logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
                 try:
-                    # Run async analysis
-                    try:
-                        logger.info("🔄 [EVAL-DEBUG] Getting event loop...")
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            logger.info("🔄 [EVAL-DEBUG] Loop is running, using ThreadPoolExecutor...")
-                            import concurrent.futures
-                            
-                            def run_async():
-                                logger.info("🔄 [EVAL-DEBUG] Creating new event loop in thread...")
-                                new_loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(new_loop)
-                                try:
-                                    logger.info("🔄 [EVAL-DEBUG] Calling _analyze_with_gemini in new loop...")
-                                    result = new_loop.run_until_complete(
-                                        self._analyze_with_gemini(transcript, interview_state)
-                                    )
-                                    logger.info(f"✅ [EVAL-DEBUG] _analyze_with_gemini returned: {result is not None}")
-                                    return result
-                                finally:
-                                    new_loop.close()
-                            
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                logger.info("⏳ [EVAL-DEBUG] Submitting async task to executor...")
-                                future = executor.submit(run_async)
-                                logger.info("⏳ [EVAL-DEBUG] Waiting for AI analysis result (timeout: 90s)...")
-                                ai_analysis = future.result(timeout=90)
-                                logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
-                        else:
-                            logger.info("🔄 [EVAL-DEBUG] Loop not running, using run_until_complete...")
-                            ai_analysis = loop.run_until_complete(
-                                self._analyze_with_gemini(transcript, interview_state)
-                            )
-                            logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
-                    except RuntimeError as re:
-                        logger.info(f"🔄 [EVAL-DEBUG] RuntimeError: {re}, using asyncio.run...")
-                        ai_analysis = asyncio.run(
-                            self._analyze_with_gemini(transcript, interview_state)
-                        )
-                        logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
+                    # Run async analysis directly
+                    logger.info("🔄 [EVAL-DEBUG] Starting direct async AI analysis...")
+                    ai_analysis = await self._analyze_with_gemini(transcript, interview_state)
+                    logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
                 except Exception as e:
+                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
                     logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
             elif transcript and len(transcript) < min_for_ai:
                 transcript_too_short = True  # Mark as short transcript scenario
@@ -1216,7 +1181,7 @@ Be encouraging but honest.
             logger.error(f"❌ Error calculating evaluation: {e}", exc_info=True)
             return None
 
-    def get_student_analytics(self, booking_tokens: List[str]) -> Dict[str, Any]:
+    async def get_student_analytics(self, booking_tokens: List[str]) -> Dict[str, Any]:
         """
         Calculate analytics for a student based on their interview history.
         """
@@ -1338,20 +1303,8 @@ Be encouraging but honest.
             # Generate AI analysis if there are 2+ interviews
             if total >= 2:
                 try:
-                    # Run async analysis
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        import concurrent.futures
-                        def run_sync():
-                            new_loop = asyncio.new_event_loop()
-                            try:
-                                return new_loop.run_until_complete(self._generate_overall_analysis_with_gemini(evaluations))
-                            finally:
-                                new_loop.close()
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            result["overall_analysis"] = executor.submit(run_sync).result(timeout=45)
-                    else:
-                        result["overall_analysis"] = loop.run_until_complete(self._generate_overall_analysis_with_gemini(evaluations))
+                    # Run async analysis directly
+                    result["overall_analysis"] = await self._generate_overall_analysis_with_gemini(evaluations)
                 except Exception as e:
                     logger.warning(f"Failed to generate overall analysis: {e}")
             

@@ -83,7 +83,7 @@ async def get_evaluation(token: str):
                     scores = existing_interview_state.get("scores") or {}
                     existing_token_usage = scores.get("token_usage")
             
-            evaluation_id = evaluation_service.calculate_evaluation_from_transcript(
+            evaluation_id = await evaluation_service.calculate_evaluation_from_transcript(
                 booking_token=token,
                 room_name=booking.get('room_name') or f"room_{token}",
                 transcript=transcript,
@@ -538,7 +538,7 @@ async def get_student_analytics(current_student: dict = Depends(get_current_stud
         booking_tokens = [b["token"] for b in bookings if b.get("token")]
 
         # 2. Calculate analytics using the service
-        analytics = evaluation_service.get_student_analytics(booking_tokens)
+        analytics = await evaluation_service.get_student_analytics(booking_tokens)
 
         return analytics
 

@@ -66,11 +66,18 @@ class GeminiConfig:
 class ElevenLabsConfig:
     """ElevenLabs TTS fallback configuration"""
     api_key: Optional[str] = None
-    voice_id: str = "LQMC3j3fn1LA9ZhI4o8g"  # Default voice
+    voice_id: str = "9HxthtUVJ9JFiIlVnvB3"  # Default voice
     model: Optional[str] = None  # Optional - custom voice determines model
     tts_enabled: bool = False
+
+
+@dataclass
+class DeepgramConfig:
+    """Deepgram STT configuration"""
+    api_key: Optional[str] = None
     stt_enabled: bool = False
-    stt_model: str = "eleven_multilingual_v2"
+    model: str = "nova-3"
+    language: str = "en-US"
 
 
 @dataclass
@@ -149,6 +156,9 @@ class Config:
     
     # AI Services - TTS fallback (ElevenLabs)
     elevenlabs: ElevenLabsConfig
+    
+    # AI Services - STT (Deepgram)
+    deepgram: DeepgramConfig
     
     # AI Services - Avatar (LiveAvatar/HeyGen)
     liveavatar: LiveAvatarConfig
@@ -297,11 +307,15 @@ class Config:
             ),
             elevenlabs=ElevenLabsConfig(
                 api_key=os.getenv("ELEVENLABS_TTS_API_KEY") or os.getenv("ELEVEN_API_KEY"),
-                voice_id=os.getenv("ELEVENLABS_VOICE_ID", "LQMC3j3fn1LA9ZhI4o8g"),
+                voice_id=os.getenv("ELEVENLABS_VOICE_ID", "9HxthtUVJ9JFiIlVnvB3"),
                 model=os.getenv("ELEVENLABS_MODEL"),  # Optional - None if not set
                 tts_enabled=os.getenv("ELEVENLABS_TTS_ENABLED", "false").lower() == "true",
-                stt_enabled=os.getenv("ELEVENLABS_STT_ENABLED", "false").lower() == "true",
-                stt_model=os.getenv("ELEVENLABS_STT_MODEL", "eleven_multilingual_v2"),
+            ),
+            deepgram=DeepgramConfig(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                stt_enabled=os.getenv("DEEPGRAM_STT_ENABLED", "false").lower() == "true",
+                model=os.getenv("DEEPGRAM_STT_MODEL", "nova-3"),
+                language=os.getenv("DEEPGRAM_STT_LANGUAGE", "en-US"),
             ),
             liveavatar=LiveAvatarConfig(
                 api_key=os.getenv("LIVEAVATAR_API_KEY"),

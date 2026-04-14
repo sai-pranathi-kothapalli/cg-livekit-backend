@@ -163,7 +163,7 @@ app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(bookings_router, prefix="/api/bookings", tags=["Bookings"])
 app.include_router(interviews_router, prefix="/api/interviews", tags=["Interviews"])
-app.include_router(slots_router, prefix="/api/slots", tags=["Slots"])
+app.include_router(slots_router, prefix="/api", tags=["Slots"])
 app.include_router(users_router, prefix="/api/users", tags=["Users"])
 app.include_router(resume_router, prefix="/api/resume", tags=["Resume"])
 app.include_router(student_router, prefix="/api/student", tags=["Student"])
@@ -173,10 +173,21 @@ app.include_router(integration_router, prefix="/api/v1/interview", tags=["Integr
 
 @app.on_event("startup")
 async def startup_log_db():
-    """Log Supabase connection status on startup."""
+    """Log Supabase connection status and reset stuck evaluation locks on startup."""
     try:
         client = get_supabase()
         logger.info("[API] Supabase client initialized successfully")
+        
+        # Reset any stuck evaluation locks every time the backend starts
+        try:
+            client.table("interview_bookings")\
+                .update({"is_evaluating": False})\
+                .eq("is_evaluating", True)\
+                .execute()
+            logger.info("[API] Cleaned up stuck interview evaluation locks")
+        except Exception as e:
+            logger.warning(f"[API] Failed to reset evaluation locks: {e}")
+            
     except Exception as e:
         logger.warning(f"[API] Supabase initialization warning: {e}")
 
