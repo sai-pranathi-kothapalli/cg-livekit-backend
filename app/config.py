@@ -91,10 +91,10 @@ class LiveAvatarConfig:
 
 @dataclass
 class SileroVADConfig:
-    """Silero VAD configuration"""
-    min_speech_duration: float = 0.2  # Reduced for better sensitivity
-    min_silence_duration: float = 5.0  # Seconds of silence before considering user done (wait before next question)
-    activation_threshold: float = 0.5  # Standard sensitivity
+    """Silero VAD configuration - optimized for lower CPU usage"""
+    min_speech_duration: float = 0.5  # Increased to reduce CPU usage (was 0.2)
+    min_silence_duration: float = 3.0  # Decreased for faster turn detection (was 5.0)
+    activation_threshold: float = 0.7  # Increased to reduce false positives (was 0.5)
 
 
 @dataclass
@@ -297,9 +297,9 @@ class Config:
                 tts_enabled=os.getenv("SELF_HOSTED_TTS_ENABLED", "true").lower() == "true",
             ),
             silero_vad=SileroVADConfig(
-                min_speech_duration=float(os.getenv("SILERO_MIN_SPEECH_DURATION", "0.3")),
-                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "4.0")),
-                activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.6")),
+                min_speech_duration=float(os.getenv("SILERO_MIN_SPEECH_DURATION", "0.5")),
+                min_silence_duration=float(os.getenv("SILERO_MIN_SILENCE_DURATION", "3.0")),
+                activation_threshold=float(os.getenv("SILERO_ACTIVATION_THRESHOLD", "0.7")),
             ),
             gemini_llm=GeminiConfig(
                 api_key=gemini_api_key,
