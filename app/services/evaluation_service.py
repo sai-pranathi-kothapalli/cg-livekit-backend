@@ -148,6 +148,7 @@ class EvaluationService:
 
                 # Build webhook payload matching what LMS expects
                 webhook_payload = {
+                    "event": "EVALUATION_COMPLETED",
                     "booking_token": booking_token,
                     "student_id": student_id,  # Provided from caller
                     "batch": batch,            # Provided from caller
@@ -156,7 +157,9 @@ class EvaluationService:
                     "communication_quality": evaluation_data.get("communication_quality"),
                     "problem_solving": evaluation_data.get("problem_solving"),
                     "coding_score": evaluation_data.get("coding_score"),
-                    "feedback": evaluation_data.get("overall_feedback", ""),
+                    "overall_feedback": evaluation_data.get("overall_feedback", ""),
+                    "strengths": evaluation_data.get("strengths", []),
+                    "areas_for_improvement": evaluation_data.get("areas_for_improvement", []),
                     "completed_at": datetime.utcnow().isoformat(),
                 }
 

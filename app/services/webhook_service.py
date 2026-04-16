@@ -22,10 +22,9 @@ class WebhookService:
     def __init__(self, supabase_client):
         self.client = supabase_client
 
-    def _sign_payload(self, payload: dict, secret: str) -> str:
-        """Create HMAC-SHA256 signature for webhook payload verification."""
-        payload_bytes = json.dumps(payload, sort_keys=True).encode()
-        return hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+    def _sign_payload(self, body_bytes: bytes, secret: str) -> str:
+        """Create HMAC-SHA256 signature for webhook body bytes."""
+        return hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
 
     async def fire_webhook(self, event: str, payload: dict, batch: str = None):
         """
@@ -84,6 +83,9 @@ class WebhookService:
         secret = webhook.get('secret')
         webhook_id = webhook.get('id')
 
+        # Serialize payload once to ensure signature matches body exactly
+        body_bytes = json.dumps(payload).encode()
+
         # Build headers
         headers = {
             "Content-Type": "application/json",
@@ -93,7 +95,7 @@ class WebhookService:
 
         # Add HMAC signature if secret is configured
         if secret:
-            signature = self._sign_payload(payload, secret)
+            signature = self._sign_payload(body_bytes, secret)
             headers["X-Webhook-Signature"] = f"sha256={signature}"
 
         # Add API key if configured by LMS
@@ -106,7 +108,7 @@ class WebhookService:
                 async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
                     response = await client.post(
                         target_url,
-                        json=payload,
+                        content=body_bytes,
                         headers=headers,
                     )
 
