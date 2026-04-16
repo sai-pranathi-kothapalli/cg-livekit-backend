@@ -60,7 +60,7 @@ def _summarize_with_gemini_sync(
     messages: List[Message],
     max_chars: int,
     api_key: str,
-    model: str = "gemini-1.5-flash",
+    model: str = "gemini-2.5-flash",
 ) -> str:
     """
     Use Gemini 1.5 to summarize older conversation (sync). Falls back to truncated
@@ -138,7 +138,7 @@ class ConversationHistoryManager:
         max_summary_chars: int = 800,
         use_gemini_for_summary: bool = False,
         gemini_api_key: Optional[str] = None,
-        gemini_model: str = "gemini-1.5-flash",
+        gemini_model: str = "gemini-2.5-flash",
     ):
         """
         Initialize conversation history manager.
@@ -160,7 +160,7 @@ class ConversationHistoryManager:
         self.max_summary_chars = max(200, max_summary_chars)
         self.use_gemini_for_summary = use_gemini_for_summary and bool(gemini_api_key)
         self.gemini_api_key = gemini_api_key or ""
-        self.gemini_model = gemini_model or "gemini-1.5-flash"
+        self.gemini_model = gemini_model or "gemini-2.5-flash"
         
         # Track conversation history in memory
         self.messages: List[Message] = []

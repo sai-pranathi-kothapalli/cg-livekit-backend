@@ -319,7 +319,7 @@ class HistoryManagedLLMWrapper:
         max_summary_chars: int = 800,
         use_gemini_for_summary: bool = False,
         gemini_api_key: Optional[str] = None,
-        gemini_model: str = "gemini-1.5-flash",
+        gemini_model: str = "gemini-2.5-flash",
     ):
         """
         Initialize history-managed LLM wrapper.
