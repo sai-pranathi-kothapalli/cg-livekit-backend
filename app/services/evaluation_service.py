@@ -28,6 +28,16 @@ except ImportError:
     HTTPX_AVAILABLE = False
     logger.warning("httpx not available - AI evaluation will use fallback mode")
 
+# Semaphore to limit concurrent Gemini evaluation calls.
+# Max 5 students processed at the same time — prevents API rate limit bursts
+# when many students finish their interviews simultaneously.
+_gemini_eval_semaphore = asyncio.Semaphore(5)
+
+# Live counters — track how many students are waiting vs actively being processed.
+# These are simple integers shared across all coroutines (safe because asyncio is single-threaded).
+_gemini_active_count = 0    # currently inside the semaphore (Gemini is running for them)
+_gemini_waiting_count = 0   # queued up, waiting for a slot to open
+
 
 class EvaluationService:
     """
@@ -380,29 +390,53 @@ Provide JSON:
                     )
                     response.raise_for_status()
                     data = response.json()
-                
+
                 if "candidates" in data and data["candidates"]:
                     text = data["candidates"][0]["content"]["parts"][0].get("text")
                     if text and len(text.strip()) > 0:
                         return text.strip()
-                
+
                 # Empty response — treat as failure and retry
-                logger.warning(f"Gemini returned empty response (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"⚠️  [GEMINI] Empty response (attempt {attempt + 1}/{max_retries})")
                 last_error = "Empty response from Gemini"
-                
-            except Exception as e:
+
+            except httpx.HTTPStatusError as e:
                 last_error = e
+                status = e.response.status_code
+
+                if status == 429:
+                    # Rate limit — Gemini needs 30-60s to recover.
+                    # Short waits are useless here, we must wait long enough for the limit to clear.
+                    delay = 30.0 * (2 ** attempt)  # 30s → 60s → 120s
+                    logger.warning(
+                        f"⚠️  [GEMINI] 429 Rate limit hit — "
+                        f"waiting {delay}s before retry (attempt {attempt + 1}/{max_retries})"
+                    )
+                else:
+                    # Other HTTP errors (500, 503 etc) — Gemini server issue, short wait is enough
+                    delay = base_delay * (2 ** attempt)  # 2s → 4s → 8s
+                    logger.warning(
+                        f"⚠️  [GEMINI] HTTP {status} error — "
+                        f"waiting {delay}s before retry (attempt {attempt + 1}/{max_retries}): {str(e)}"
+                    )
+
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(delay)
+                continue
+
+            except Exception as e:
+                # Network error, timeout, DNS failure etc — short wait is enough
+                last_error = e
+                delay = base_delay * (2 ** attempt)  # 2s → 4s → 8s
                 logger.warning(
-                    f"Gemini API call failed (attempt {attempt + 1}/{max_retries}): {str(e)}"
+                    f"⚠️  [GEMINI] Network/timeout error — "
+                    f"waiting {delay}s before retry (attempt {attempt + 1}/{max_retries}): {str(e)}"
                 )
-            
-            # Wait before retrying (exponential backoff: 2s, 4s, 8s)
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                logger.info(f"Retrying Gemini call in {delay}s...")
-                await asyncio.sleep(delay)
-        
-        # All retries failed
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(delay)
+                continue
+
+        # All retries exhausted
         raise Exception(
             f"Gemini API failed after {max_retries} attempts. Last error: {str(last_error)}"
         )
@@ -934,6 +968,11 @@ Be encouraging but honest.
         Returns:
             Evaluation ID if successful
         """
+        # Initialise outside try so the outer except can always reference them
+        # even if the exception fires before they are resolved inside.
+        batch = None
+        student_id = None
+
         try:
             # Debug logging
             logger.info(f"📊 [EVAL] Starting evaluation for {booking_token}")
@@ -941,10 +980,8 @@ Be encouraging but honest.
             logger.info(f"📊 [EVAL] Interview state present: {interview_state is not None}")
             logger.info(f"📊 [EVAL] HTTPX available: {HTTPX_AVAILABLE}")
             logger.info(f"📊 [EVAL] Gemini API key set: {bool(self.config.gemini_llm.api_key)}")
-            
+
             # 0. Resolve batch and student_id from booking once at the start
-            batch = None
-            student_id = None
             try:
                 booking_res = self.client.table("interview_bookings").select("batch, enrolled_user_id, user_id").eq("token", booking_token).limit(1).execute()
                 if booking_res.data:
@@ -989,15 +1026,17 @@ Be encouraging but honest.
                 if not interview_state:
                     interview_state = response.data[0].get("interview_state") or {}
 
-            # 2. IMMEDIATE SAVE: Save basic evaluation with token usage to prevent data loss on timeout
-            logger.info(f"💾 Saving PRELIMINARY evaluation with token_usage={token_usage}")
-            evaluation_id = self.create_evaluation(
+            # 2. PRELIMINARY SAVE: Show "AI analysis in progress..." to student immediately.
+            # This is intentional UX — student sees feedback is being prepared right away.
+            # The final save below will always overwrite this with real scores or a failure message.
+            logger.info(f"💾 Saving PRELIMINARY evaluation (showing 'in progress' to student)")
+            self.create_evaluation(
                 booking_token=booking_token,
                 room_name=room_name,
                 duration_minutes=duration_minutes,
                 total_questions=total_questions,
                 rounds_completed=len(incremental_evals) if incremental_evals else rounds_completed,
-                overall_score=None, # Pending
+                overall_score=None,
                 rounds_data=incremental_evals,
                 strengths=[],
                 areas_for_improvement=[],
@@ -1045,16 +1084,50 @@ Be encouraging but honest.
                 logger.info(f"✅ [EVAL] Successfully aggregated incremental results. Final Score: {avg_score}")
                 # Skip full Gemini analysis if we aggregated successfully
             elif transcript and len(transcript) >= min_for_ai:
-                logger.info("🚀 [EVAL] Sufficient transcript but no incremental evals (or < 3). Starting FULL AI analysis...")
-                logger.info("🚀 [EVAL-DEBUG] Threshold passed, starting AI analysis...")
+                logger.info("🚀 [EVAL] Sufficient transcript, starting FULL AI analysis...")
                 try:
-                    # Run async analysis directly
-                    logger.info("🔄 [EVAL-DEBUG] Starting direct async AI analysis...")
-                    ai_analysis = await self._analyze_with_gemini(transcript, interview_state)
-                    logger.info(f"✅ [EVAL-DEBUG] AI analysis completed: {ai_analysis is not None}")
+                    global _gemini_active_count, _gemini_waiting_count
+
+                    # Step 1 — join the queue
+                    _gemini_waiting_count += 1
+                    logger.info(
+                        f"⏳ [BATCH] {booking_token} is WAITING for a slot. "
+                        f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}"
+                    )
+
+                    async with _gemini_eval_semaphore:
+                        # Step 2 — slot acquired, move from waiting → active
+                        _gemini_waiting_count -= 1
+                        _gemini_active_count += 1
+                        logger.info(
+                            f"🔄 [BATCH] {booking_token} entered slot — Gemini starting. "
+                            f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}"
+                        )
+
+                        ai_analysis = await self._analyze_with_gemini(transcript, interview_state)
+
+                        # Step 3 — done, release slot
+                        _gemini_active_count -= 1
+                        if ai_analysis:
+                            score = ai_analysis.get('overall_score', 'N/A')
+                            logger.info(
+                                f"✅ [BATCH] {booking_token} DONE. Score: {score}. "
+                                f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️  [BATCH] {booking_token} returned no result — fallback will apply. "
+                                f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}"
+                            )
+
                 except Exception as e:
-                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
-                    logger.warning(f"❌ [EVAL-DEBUG] AI analysis failed: {e}, using fallback", exc_info=True)
+                    _gemini_active_count = max(0, _gemini_active_count - 1)
+                    _gemini_waiting_count = max(0, _gemini_waiting_count - 1)
+                    logger.error(
+                        f"❌ [BATCH] {booking_token} FAILED with exception: {e}. "
+                        f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}",
+                        exc_info=True
+                    )
             elif transcript and len(transcript) < min_for_ai:
                 transcript_too_short = True  # Mark as short transcript scenario
                 logger.info(
@@ -1178,7 +1251,32 @@ Be encouraging but honest.
             return evaluation_id
             
         except Exception as e:
-            logger.error(f"❌ Error calculating evaluation: {e}", exc_info=True)
+            logger.error(f"❌ CRITICAL: Error calculating evaluation for {booking_token}: {e}", exc_info=True)
+            # Always overwrite the "AI analysis in progress..." preliminary record with a real result.
+            # Student must never be permanently stuck on the in-progress message.
+            try:
+                self.create_evaluation(
+                    booking_token=booking_token,
+                    room_name=room_name,
+                    overall_score=5.0,
+                    communication_quality=5.0,
+                    technical_knowledge=5.0,
+                    problem_solving=5.0,
+                    coding_score=5.0,
+                    overall_feedback=(
+                        "The interview has been completed and your responses have been recorded. "
+                        "Detailed AI-powered analysis was unavailable for this session due to a technical issue. "
+                        "Please contact support with your booking reference if you need further assistance."
+                    ),
+                    strengths=["Interview session completed", "Responses recorded successfully"],
+                    areas_for_improvement=["Detailed feedback unavailable — contact support"],
+                    parse_status="failed",
+                    batch=batch,
+                    student_id=student_id,
+                )
+                logger.info(f"✅ Wrote failure fallback record for {booking_token} — student will not be stuck on 'in progress'")
+            except Exception as write_err:
+                logger.error(f"❌ Also failed to write fallback record for {booking_token}: {write_err}")
             return None
 
     async def get_student_analytics(self, booking_tokens: List[str]) -> Dict[str, Any]:
