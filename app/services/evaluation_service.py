@@ -365,7 +365,8 @@ Provide JSON:
         Raises after max_retries failures.
         """
         last_error = None
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.gemini_llm.model}:generateContent"
+        model_to_use = self.config.gemini_llm.evaluation_model or self.config.gemini_llm.model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_to_use}:generateContent"
         
         # Build generation config
         generation_config = {"temperature": 0.1}
@@ -1128,6 +1129,7 @@ Be encouraging but honest.
                         f"Active: {_gemini_active_count}/5 | Waiting: {_gemini_waiting_count}",
                         exc_info=True
                     )
+
             elif transcript and len(transcript) < min_for_ai:
                 transcript_too_short = True  # Mark as short transcript scenario
                 logger.info(

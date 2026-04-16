@@ -241,7 +241,7 @@ async def delete_slot(
         )
 
 
-@router.get("/student/available", response_model=List[SlotResponse])
+@router.get("/available/slots", response_model=List[SlotResponse])
 async def get_available_slots():
     """
     Get available slots for students (public endpoint, no auth required).
