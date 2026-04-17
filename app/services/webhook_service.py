@@ -83,8 +83,8 @@ class WebhookService:
         secret = webhook.get('secret')
         webhook_id = webhook.get('id')
 
-        # Serialize payload once to ensure signature matches body exactly
-        body_bytes = json.dumps(payload).encode()
+        # Serialize payload once with sorted keys to ensure deterministic signature matches body exactly
+        body_bytes = json.dumps(payload, sort_keys=True).encode()
 
         # Build headers
         headers = {

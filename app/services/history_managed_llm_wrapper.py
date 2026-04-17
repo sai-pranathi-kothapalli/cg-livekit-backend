@@ -18,24 +18,22 @@ logger = get_logger(__name__)
 
 # --- Interview guard: prevent AI from concluding early ---
 MIN_REQUIRED_QUESTIONS = 8
-_questions_asked: int = 0
+_questions_asked_var: contextvars.ContextVar[int] = contextvars.ContextVar("questions_asked", default=0)
 
 
 def get_questions_asked() -> int:
     """Return number of assistant turns (questions) so far this session."""
-    return _questions_asked
+    return _questions_asked_var.get()
 
 
 def increment_questions_asked() -> None:
     """Call when an assistant response (question) has been completed."""
-    global _questions_asked
-    _questions_asked += 1
+    _questions_asked_var.set(_questions_asked_var.get() + 1)
 
 
 def reset_questions_asked() -> None:
     """Call when a new interview starts (e.g. candidate joins)."""
-    global _questions_asked
-    _questions_asked = 0
+    _questions_asked_var.set(0)
 
 
 # Decoder-level: strip wrap-up language; never replace with a static filler (no "Let me ask you one more question.")
