@@ -40,7 +40,7 @@ importlib_metadata==8.7.1
 Jinja2==3.1.6
 jiter==0.12.0
 livekit==1.1.2
-livekit-agents==1.4.4
+livekit-agents>=0.10.0
 livekit-api==1.1.0
 livekit-blingfire==1.1.0
 # Cloud service plugins (optional fallbacks - only used when enabled in .env)
