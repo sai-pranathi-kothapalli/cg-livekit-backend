@@ -144,6 +144,26 @@ async def request_password_reset(request: Request, body: PasswordResetRequestSch
         email = body.email.strip().lower()
         user = auth_service.get_user_by_email(email)
 
+        # ── ON-DEMAND REGISTRATION ───────────────────────────────────────────
+        # If user is not in 'users' table, check if they are in 'enrolled_users'.
+        # If so, automatically create their student account so they can reset.
+        if not user:
+            enrolled_user = user_service.get_user_by_email(email)
+            if enrolled_user:
+                logger.info(f"[API] 🆕 Auto-registering enrolled student for password reset: {email}")
+                try:
+                    # Generate a random temp password (will be reset anyway)
+                    temp_pass = auth_service.generate_temporary_password()
+                    user = auth_service.register_student(
+                        email=email,
+                        password=temp_pass,
+                        name=enrolled_user.get('name', 'Student'),
+                        phone=enrolled_user.get('phone'),
+                        must_change_password=True
+                    )
+                except Exception as reg_err:
+                    logger.error(f"[API] Failed auto-registration for {email}: {reg_err}")
+
         if user:
             otp = otp_service.create_otp(email)
             # Fire-and-forget: don't block or leak errors to caller

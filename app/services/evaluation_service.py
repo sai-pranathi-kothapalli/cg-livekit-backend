@@ -11,6 +11,8 @@ import asyncio
 import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import io
+# reportlab imports moved inside generate_pdf_report for lazy loading to prevent Agent crash
 from decimal import Decimal
 from app.config import Config
 from app.db.supabase import get_supabase
@@ -64,6 +66,7 @@ class EvaluationService:
         technical_knowledge: Optional[float] = None,
         problem_solving: Optional[float] = None,
         coding_score: Optional[float] = None,
+        confidence_level: Optional[float] = None,
         overall_feedback: Optional[str] = None,
         token_usage: Optional[Dict[str, int]] = None,
         parse_status: str = "success",
@@ -96,8 +99,13 @@ class EvaluationService:
                     interview_state["scores"]["problem_solving"] = float(problem_solving)
                 if coding_score is not None:
                     interview_state["scores"]["coding_score"] = float(coding_score)
+                if confidence_level is not None:
+                    interview_state["scores"]["confidence_level"] = float(confidence_level)
                 if overall_feedback is not None:
-                    interview_state["scores"]["overall_feedback"] = overall_feedback
+                    # Sanitize: replace literal \n strings with real newlines if they exist
+                    sanitized_feedback = overall_feedback.replace('\\n', '\n')
+                    interview_state["scores"]["overall_feedback"] = sanitized_feedback
+                    overall_feedback = sanitized_feedback
                 if token_usage is not None:
                     interview_state["scores"]["token_usage"] = token_usage
             
@@ -521,6 +529,224 @@ Be encouraging but honest.
                 logger.info(f"✅ Created evaluation and stored first incremental result for booking {booking_token}")
         except Exception as e:
             logger.error(f"❌ Failed to store incremental evaluation: {e}")
+
+    async def generate_pdf_report(self, token: str) -> Optional[io.BytesIO]:
+        """
+        Generate a PDF report for an interview evaluation.
+        Includes candidate name, date/time, system prompt, and scores.
+        """
+        try:
+            # 1. Fetch data
+            evaluation = self.get_evaluation(token)
+            if not evaluation:
+                logger.warning(f"No evaluation found for token {token}")
+                return None
+
+            from app.services.booking_service import BookingService
+            from app.services.system_instructions_service import SystemInstructionsService
+            
+            booking_svc = BookingService(self.config)
+            booking = booking_svc.get_booking(token)
+            
+            # Use custom prompt from booking if available, otherwise fallback to system prompt
+            custom_prompt = booking.get("prompt") if booking else None
+            if custom_prompt:
+                display_prompt = custom_prompt
+            else:
+                prompt_svc = SystemInstructionsService(self.config)
+                display_prompt = prompt_svc.get_system_instructions().get("instructions", "No system prompt available.")
+
+            candidate_name = booking.get("name", "Unknown Candidate") if booking else "Unknown Candidate"
+            scheduled_at = booking.get("scheduled_at", "Unknown Date") if booking else "Unknown Date"
+            
+            # Format date
+            try:
+                dt = datetime.fromisoformat(scheduled_at.replace('Z', '+00:00'))
+                formatted_date = dt.strftime("%B %d, %Y at %I:%M %p")
+            except:
+                formatted_date = scheduled_at
+
+
+            # 2. Create PDF (Lazy Imports)
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+            
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=40)
+            styles = getSampleStyleSheet()
+            
+            # Professional Styles
+            styles.add(ParagraphStyle(name='HeaderTitle', fontSize=24, spaceAfter=20, alignment=1, fontWeight='bold', color=colors.HexColor("#1e293b")))
+            styles.add(ParagraphStyle(name='SubHeader', fontSize=14, spaceAfter=15, fontWeight='bold', color=colors.HexColor("#6366f1"), borderPadding=5))
+            styles.add(ParagraphStyle(name='MetadataLabel', fontSize=10, fontWeight='bold', color=colors.HexColor("#64748b")))
+            styles.add(ParagraphStyle(name='MetadataValue', fontSize=10, color=colors.HexColor("#1e293b")))
+            styles.add(ParagraphStyle(name='SectionHeader', fontSize=12, fontWeight='bold', spaceBefore=12, spaceAfter=8, color=colors.HexColor("#1e293b")))
+            styles.add(ParagraphStyle(name='BodyNormal', fontSize=10, leading=14, spaceAfter=8, color=colors.HexColor("#334155")))
+            styles.add(ParagraphStyle(name='BulletPoint', fontSize=10, leading=14, leftIndent=20, bulletIndent=10, spaceAfter=5, color=colors.HexColor("#334155")))
+            styles.add(ParagraphStyle(name='PromptGray', fontSize=8, fontName='Courier', color=colors.HexColor("#94a3b8"), leftIndent=10, rightIndent=10))
+
+            elements = []
+
+            # 1. Header & Branding
+            elements.append(Paragraph("INTERVIEW EVALUATION REPORT", styles['HeaderTitle']))
+            elements.append(Spacer(1, 10))
+
+            # 2. Executive Summary Box
+            meta_data = [
+                [Paragraph("CANDIDATE", styles['MetadataLabel']), Paragraph(candidate_name.upper(), styles['MetadataValue'])],
+                [Paragraph("INTERVIEW DATE", styles['MetadataLabel']), Paragraph(formatted_date, styles['MetadataValue'])],
+                [Paragraph("OVERALL SCORE", styles['MetadataLabel']), Paragraph(f"{evaluation.get('overall_score', 'N/A')} / 10", styles['MetadataValue'])],
+                [Paragraph("CONFIDENCE LEVEL", styles['MetadataLabel']), Paragraph(f"{evaluation.get('interview_state', {}).get('scores', {}).get('confidence_level', 'N/A')} / 10", styles['MetadataValue'])],
+            ]
+            meta_table = Table(meta_data, colWidths=[150, 300])
+            meta_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#e2e8f0")),
+                ('PADDING', (0, 0), (-1, -1), 12),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            elements.append(meta_table)
+            elements.append(Spacer(1, 30))
+
+            # 3. Performance Scorecard
+            elements.append(Paragraph("PERFORMANCE SCORECARD", styles['SubHeader']))
+            
+            interview_state = evaluation.get("interview_state", {})
+            scores = interview_state.get("scores", {})
+            
+            # Prepare Score Data (Metric, Score, Interpretation)
+            def get_interp(s):
+                try:
+                    s = float(s)
+                    if s >= 8: return "EXCELLENT"
+                    if s >= 6: return "PROFICIENT"
+                    if s >= 4: return "ADEQUATE"
+                    return "DEVELOPING"
+                except: return "N/A"
+
+            skill_metrics = [
+                ["ASSESSMENT CATEGORY", "SCORE", "INTERPRETATION"],
+                ["Communication & Language", f"{scores.get('communication_quality', evaluation.get('communication_quality', 'N/A'))}/10", get_interp(scores.get('communication_quality', evaluation.get('communication_quality', 0)))],
+                ["Technical Knowledge", f"{scores.get('technical_knowledge', evaluation.get('technical_knowledge', 'N/A'))}/10", get_interp(scores.get('technical_knowledge', evaluation.get('technical_knowledge', 0)))],
+                ["Problem Solving Logic", f"{scores.get('problem_solving', evaluation.get('problem_solving', 'N/A'))}/10", get_interp(scores.get('problem_solving', evaluation.get('problem_solving', 0)))],
+                ["Coding Performance", f"{scores.get('coding_score', evaluation.get('coding_score', 'N/A'))}/10", get_interp(scores.get('coding_score', evaluation.get('coding_score', 0)))]
+            ]
+            
+            st_table = Table(skill_metrics, colWidths=[200, 100, 150])
+            st_table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+                ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor("#334155")),
+            ]))
+            elements.append(st_table)
+            elements.append(Spacer(1, 25))
+
+            # 4. Detailed Feedback (from overall_feedback)
+            if evaluation.get("overall_feedback"):
+                elements.append(Paragraph("DETAILED EVALUATION ANALYSIS", styles['SubHeader']))
+                
+                # Normalize and split feedback
+                raw_fb = evaluation.get("overall_feedback", "").replace("\\n", "\n").replace("\r\n", "\n")
+                
+                lines = raw_fb.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # 1. Detection of Headers (### or ## or #)
+                    if line.startswith('#'):
+                        clean_line = line.lstrip('#').strip()
+                        # Capitalize for emphasis if it was a high-level header
+                        if line.startswith('###'):
+                            elements.append(Paragraph(clean_line.upper(), styles['SectionHeader']))
+                        else:
+                            elements.append(Paragraph(clean_line, styles['SectionHeader']))
+                    
+                    # 2. Detection of Bullets (- or * or •)
+                    elif line.startswith('- ') or line.startswith('* ') or line.startswith('• '):
+                        # Extract content and escape
+                        clean_content = line[2:].strip()
+                        escaped_content = clean_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        
+                        # Support bold markers in bullets
+                        styled_content = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped_content)
+                        styled_content = re.sub(r'__(.*?)__', r'<b>\1</b>', styled_content)
+                        
+                        elements.append(Paragraph(f"• {styled_content}", styles['BulletPoint']))
+                    
+                    # 3. Handle normal lines, but check for bold markers
+                    else:
+                        # PROACTIVE BULLETIZING: Check if this line looks like a category analysis (e.g., "Category (6/10): text")
+                        # This ensures even OLD evaluations look organized.
+                        category_match = re.match(r'^([\w\s&\-]+ \(\d+(?:\.\d+)?/10\):?)\s*(.*)$', line)
+                        
+                        if category_match:
+                            header, content = category_match.groups()
+                            # 1. Add the header as a bold section
+                            elements.append(Paragraph(f"<b>{header}</b>", styles['BodyNormal']))
+                            
+                            # 2. Split content into sentences and render as bullets
+                            # Simple sentence splitter (covers most cases)
+                            sentences = re.split(r'(?<=[.!?])\s+', content.strip())
+                            for sent in sentences:
+                                if not sent: continue
+                                # Escape and style each sentence
+                                escaped_sent = sent.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                styled_sent = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped_sent)
+                                elements.append(Paragraph(f"• {styled_sent}", styles['BulletPoint']))
+                            
+                            elements.append(Spacer(1, 5))
+                            continue
+
+                        # Default paragraph handling
+                        # Escape special XML characters for ReportLab
+                        escaped_line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        
+                        # Convert bold **text** and __text__ to <b> for ReportLab
+                        styled_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped_line)
+                        styled_line = re.sub(r'__(.*?)__', r'<b>\1</b>', styled_line)
+                        
+                        elements.append(Paragraph(styled_line, styles['BodyNormal']))
+                
+                elements.append(Spacer(1, 20))
+
+            # 5. Key Highlights (Strengths/Improvements)
+            h_data = []
+            if evaluation.get("strengths"):
+                elements.append(Paragraph("KEY STRENGTHS", styles['SubHeader']))
+                for s in evaluation.get("strengths")[:4]:
+                    elements.append(Paragraph(f"• {s}", styles['BulletPoint']))
+                elements.append(Spacer(1, 15))
+
+            if evaluation.get("areas_for_improvement"):
+                elements.append(Paragraph("AREAS FOR GROWTH", styles['SubHeader']))
+                for a in evaluation.get("areas_for_improvement")[:4]:
+                    elements.append(Paragraph(f"• {a}", styles['BulletPoint']))
+                elements.append(Spacer(1, 20))
+
+            # 6. Appendix: Interview Setup (New Page)
+            elements.append(PageBreak())
+            elements.append(Paragraph("APPENDIX: INTERVIEW CONFIGURATION", styles['SubHeader']))
+            elements.append(Paragraph("The following instructions were provided to the AI Agent for this specific session:", styles['BodyNormal']))
+            elements.append(Spacer(1, 10))
+            elements.append(Paragraph(display_prompt.replace('\n', '<br/>'), styles['PromptGray']))
+
+            doc.build(elements)
+            buffer.seek(0)
+            return buffer
+        except Exception as e:
+            logger.error(f"Error generating PDF report: {e}", exc_info=True)
+            return None
 
     async def get_evaluation_by_token(self, token: str) -> Optional[Dict[str, Any]]:
         """

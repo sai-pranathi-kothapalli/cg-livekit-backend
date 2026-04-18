@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.schemas.interviews import (
     EvaluationResponse,
@@ -150,6 +151,7 @@ async def get_evaluation(token: str):
             technical_knowledge=scores.get("technical_knowledge"),
             problem_solving=scores.get("problem_solving"),
             coding_score=scores.get("coding_score"),
+            confidence_level=scores.get("confidence_level"),
             overall_feedback=scores.get("overall_feedback"),
             token_usage=scores.get("token_usage"),
         )
@@ -163,6 +165,44 @@ async def get_evaluation(token: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_msg
         )
+
+
+@router.get("/evaluation/{token}/export/pdf")
+async def export_evaluation_pdf(token: str):
+    """
+    Download interview evaluation as a PDF report.
+    """
+    from app.utils.sanitize import sanitize_uuid
+    try:
+        token = sanitize_uuid(token)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # [OK] Added: Ensure evaluation exists before generating PDF
+    # Trigger calculation if missing but transcript exists (Robustness)
+    evaluation = evaluation_service.get_evaluation(token)
+    transcript = transcript_storage_service.get_transcript(token)
+    
+    if not evaluation and transcript:
+        logger.info(f"[API] Evaluation missing for PDF export of {token}, recalculating...")
+        booking = booking_service.get_booking(token)
+        await evaluation_service.calculate_evaluation_from_transcript(
+            booking_token=token,
+            room_name=booking.get('room_name') or f"room_{token}",
+            transcript=transcript
+        )
+
+    pdf_buffer = await evaluation_service.generate_pdf_report(token)
+    if not pdf_buffer:
+        raise HTTPException(status_code=404, detail="Evaluation or PDF report could not be generated")
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename=interview_report_{token[:8]}.pdf"
+        }
+    )
 
 
 @router.get("/session-state/{token}", response_model=SessionStateResponse)

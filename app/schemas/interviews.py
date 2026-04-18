@@ -32,11 +32,11 @@ class EvaluationResponse(BaseModel):
     strengths: List[str] = []
     areas_for_improvement: List[str] = []
     transcript: List[Dict[str, Any]] = []
-    # Gemini analysis criteria (0-10 each) and overall feedback paragraph
     communication_quality: Optional[float] = None
     technical_knowledge: Optional[float] = None
     problem_solving: Optional[float] = None
     coding_score: Optional[float] = None
+    confidence_level: Optional[float] = None
     overall_feedback: Optional[str] = None
     token_usage: Optional[Dict[str, int]] = None
 

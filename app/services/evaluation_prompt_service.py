@@ -47,19 +47,23 @@ Analyze for signs of dishonesty, external help, or coaching. Flag unusually long
 ### SECTION 2: TECHNICAL KNOWLEDGE EVALUATION
 Evaluate correctness, depth of understanding, knowledge of edge cases, and consistency for each topic.
 
-### SECTION 3: COMMUNICATION SKILLS
-Assess clarity, structure, confidence, brevity, and active listening.
+### SECTION 3: COMMUNICATION & LANGUAGE PROFICIENCY
+Analyze communication quality through these four dimensions:
+1. Lexical Resource: Diversity, precision, and appropriateness of vocabulary used.
+2. Grammatical Range & Accuracy: Variety and complexity of sentence structures and correctness.
+3. Fluency & Coherence: Logical flow of ideas, pace of speech, and use of cohesive markers.
+4. Pronunciation & Articulated Clarity: Clarity of expression and professional tone (based on transcript cues).
 
-### SECTION 4: PROBLEM SOLVING BEHAVIOR
-Analyze clarified questions, thinking out loud, logical progression, and self-review.
+### SECTION 4: PROBLEM SOLVING & LOGICAL REASONING
+Analyze clarified questions, thinking out loud, logical progression, and self-correction behavior.
 
-### SECTION 5: BEHAVIORAL & SOFT SKILLS
-Evaluate handling of pressure, attitude, and ownership of knowledge gaps.
+### SECTION 5: BEHAVIORAL & PROFESSIONAL ATTRIBUTES
+Evaluate handling of pressure, professional attitude, and ownership of knowledge gaps.
 
-### SECTION 6: PROCTORING VIOLATION SUMMARY
-Classify violations (MINOR/MODERATE/SEVERE) and identify if they coincide with hard questions.
+### SECTION 6: PROCTORING & INTEGRITY SUMMARY
+Classify violations (MINOR/MODERATE/SEVERE) and identify if they coincide with particularly challenging questions.
 
-### SECTION 7: CODING QUESTION EVALUATION
+### SECTION 7: CODING & ALGORITHMIC ASSESSMENT
 Evaluate correctness, quality, complexity (Big O), and problem-solving approach. Perform deep integrity analysis on code (suspiciously perfect code vs. human-like minor errors).
 
 ---
@@ -69,13 +73,13 @@ Your final response MUST be a single, valid JSON object. All string values MUST 
 The "overall_feedback" field contains markdown text - ensure all quotes, newlines, and special characters are properly escaped for JSON.
 
 CRITICAL JSON REQUIREMENTS:
-- All quotes inside string values MUST be escaped with backslashes (\\")
-- Newlines in strings MUST be escaped as \\n
+- All quotes inside string values MUST be escaped with backslashes (\")
+- Newlines in strings MUST be escaped as \n
 - Do not include any text outside the JSON object
 - The JSON must be valid and parseable by standard JSON parsers
-- If the "overall_feedback" contains markdown with quotes, escape them: \\"
+- If the "overall_feedback" contains markdown with quotes, escape them: \"
 
-{{
+{
     "overall_score": <number 1-10>,
     "integrity_score": <number 1-10>,
     "technical_knowledge": <number 1-10>,
@@ -86,29 +90,29 @@ CRITICAL JSON REQUIREMENTS:
     "integrity_verdict": "CLEAN" | "SUSPICIOUS" | "HIGH RISK",
     "strengths": ["list", "of", "strengths"],
     "areas_for_improvement": ["list", "of", "areas"],
-    "overall_feedback": "FULL MARKDOWN REPORT STARTING WITH ### CANDIDATE SUMMARY... (ALL QUOTES ESCAPED)",
+    "overall_feedback": "FULL MARKDOWN REPORT... (ALL QUOTES ESCAPED)",
     "rounds_analysis": [
-        {{
+        {
             "round_name": "...",
             "performance_summary": "...",
             "topics_covered": [],
             "average_rating": <number>
-        }}
+        }
     ]
-}}
+}
 
 The "overall_feedback" markdown MUST include:
 1. ### CANDIDATE SUMMARY
-2. ### SCORECARD (as a markdown table)
-3. ### REASONING
-4. ### RED FLAGS (if any)
-5. ### STRENGTHS
-6. ### AREAS OF CONCERN
-7. ### CODING EVALUATION (per question data and scorecard)
+2. ### DETAILED COMMUNICATION ASSESSMENT (Include Lexical, Grammatical, and Fluency breakdown)
+3. ### SCORECARD (as a markdown table)
+4. ### REASONING & EVIDENCE
+5. ### STRENGTHS & RED FLAGS
+6. ### AREAS FOR IMPROVEMENT
+7. ### CODING EVALUATION (if applicable)
 
-CRITICAL RULE: Do NOT use the terms "Hire" or "Do Not Hire" anywhere in your evaluation (including the Reasoning section). Provide objective analysis of the candidate's suitability without making a final hiring declaration.
+CRITICAL RULE: Do NOT use the terms "Hire" or "Do Not Hire" anywhere in your evaluation. Provide objective analysis without making a final hiring declaration.
 
-Be objective, evidence-based, and reference specific timestamps or quotes."""
+Be objective, evidence-based, and reference specific quotes or behaviors from the transcript."""
 
 
 class EvaluationPromptService:
