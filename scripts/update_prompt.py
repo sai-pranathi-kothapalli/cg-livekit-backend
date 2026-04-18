@@ -14,7 +14,7 @@ def update():
 
     p = res.data[0]['prompt_template']
     
-    # 2. Update JSON Schema
+    # 2. Update JSON Schema and Instructions
     if '"confidence_level":' not in p:
         p = p.replace(
             '    "coding_score": <number 1-10>,', 
@@ -22,7 +22,21 @@ def update():
         )
         print("✅ Added confidence_level to JSON schema")
 
-    # 3. Update Formatting Instructions for Reasoning
+    # 3. Add Confidence Rubric
+    CONFIDENCE_RUBRIC = """
+    Confidence Level (1-10):
+    - 1-3: Candidate gives very short answers, frequently says "I don't know", long silences, refuses questions.
+    - 4-6: Some hesitation, occasional short answers, recovers when prompted.
+    - 7-9: Speaks clearly and directly, elaborates without prompting.
+    - 10: Exceptional clarity, strong opinions, handles all questions confidently.
+    """
+    
+    if "Confidence Level (1-10):" not in p:
+        # Inject before REASONING
+        p = p.replace('3. ### REASONING', f"{CONFIDENCE_RUBRIC}\n\n3. ### REASONING")
+        print("✅ Added Confidence Rubric to instructions")
+
+    # 4. Update Formatting Instructions for Reasoning
     if '(Use bullet points for category analysis)' not in p:
         p = p.replace(
             '3. ### REASONING', 

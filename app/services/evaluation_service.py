@@ -854,14 +854,15 @@ Be encouraging but honest.
                         "type": "array",
                         "items": {"type": "string"}
                     },
-                    "overall_feedback": {"type": "string"}
+                    "overall_feedback": {"type": "string"},
+                    "confidence_level": {"type": "integer"}
                 },
                 "required": [
                     "overall_score", "communication_quality",
                     "technical_knowledge", "problem_solving",
                     "coding_score", "integrity_score",
                     "strengths", "areas_for_improvement",
-                    "overall_feedback"
+                    "overall_feedback", "confidence_level"
                 ]
             }
 
@@ -982,6 +983,7 @@ Be encouraging but honest.
                 "Please review the interview transcript manually. "
                 f"Raw AI response preview: {raw_response[:200]}..."
             ),
+            "confidence_level": 0,
             "parse_status": "failed"
         }
 
@@ -1310,6 +1312,7 @@ Be encouraging but honest.
                     "technical_knowledge": avg_score, # Fallback
                     "problem_solving": avg_score,     # Fallback
                     "coding_score": avg_score,        # Fallback
+                    "confidence_level": avg_comm,     # Fallback to communication quality for incremental aggregation
                     "overall_feedback": "\n".join([f"- {fb}" for fb in all_feedback]),
                     "strengths": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) >= 7],
                     "areas_for_improvement": [ev.get("feedback") for ev in incremental_evals if ev.get("score", 0) < 7]
@@ -1393,15 +1396,13 @@ Be encouraging but honest.
                 if coding_score is None:
                     coding_score = 7.0
                 
-                strengths = ai_analysis.get('strengths') or []
-                areas_for_improvement = ai_analysis.get('areas_for_improvement') or []
-                # rounds_analysis removed - no longer storing rounds data
                 overall_feedback = ai_analysis.get('overall_feedback') or "Interview completed successfully."
+                confidence_level = ai_analysis.get('confidence_level', 7.0)
                 
                 # Log if this was a partial extraction (only some fields)
                 extracted_fields = [k for k in ['overall_score', 'communication_quality', 'technical_knowledge', 
                                                 'problem_solving', 'coding_score', 'strengths', 
-                                                'areas_for_improvement', 'overall_feedback'] if k in ai_analysis]
+                                                'areas_for_improvement', 'overall_feedback', 'confidence_level'] if k in ai_analysis]
                 if len(extracted_fields) < 7:
                     logger.info(f"✅ Using AI-generated evaluation (partial extraction: {extracted_fields}, score: {overall_score})")
                 else:
@@ -1416,6 +1417,7 @@ Be encouraging but honest.
                     technical_knowledge = 0.0
                     problem_solving = 0.0
                     coding_score = 0.0
+                    confidence_level = 0.0
 
                     overall_feedback = (
                         f"⚠️ **Insufficient Conversation for Detailed Analysis**\n\n"
@@ -1444,6 +1446,7 @@ Be encouraging but honest.
                     technical_knowledge = 5.0
                     problem_solving = 5.0
                     coding_score = 5.0
+                    confidence_level = 5.0
                     overall_feedback = (
                         "The interview has been completed and basic metrics have been captured. "
                         "Detailed AI-powered analysis was unavailable for this session due to technical limitations. "
@@ -1476,6 +1479,7 @@ Be encouraging but honest.
                 technical_knowledge=technical_knowledge,
                 problem_solving=problem_solving,
                 coding_score=coding_score,
+                confidence_level=confidence_level,
                 overall_feedback=overall_feedback,
                 token_usage=token_usage,
                 parse_status=ai_analysis.get("parse_status", "success") if ai_analysis else ("success" if not transcript_too_short else "failed"),
