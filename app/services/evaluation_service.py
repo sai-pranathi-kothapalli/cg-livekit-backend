@@ -1396,6 +1396,8 @@ Be encouraging but honest.
                 if coding_score is None:
                     coding_score = 7.0
                 
+                strengths = ai_analysis.get('strengths') or []
+                areas_for_improvement = ai_analysis.get('areas_for_improvement') or []
                 overall_feedback = ai_analysis.get('overall_feedback') or "Interview completed successfully."
                 confidence_level = ai_analysis.get('confidence_level', 7.0)
                 
